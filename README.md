@@ -140,6 +140,9 @@ Specifier  | Format       | Example value             | Result
 `e`        | scientific   | 1250000.0                 | 1.250000e+06
 `g`        | flt./sci.    | 1250000.0                 | 1.25e+06
 `na`       | no address   | 0x010C5F20 {x = 0, y = 1} | x = 0, y = 1
+`l`        | list members | 0x010C5F20 {size=4}       | 0x010C5F20 [26500, 29358, 15724, 26962]
+`lna`      | list members | 0x010C5F20 {size=4}       | [26500, 29358, 15724, 26962]
+`lnax`     | list members | 0x010C5F20 {size=4}       | [0x6784, 0x72ae, 0x3d6c, 0x6952]
 
 ### Watch scope locks
 
@@ -155,11 +158,11 @@ Available special keywords: `$function`, `$caller`, `$stack`
 
 ### Function breakpoints
 
-Use the syntax `funcname,filename:line` to set breakpoints on function _funcname_ found in file _filename_ at line _line_. `filename` and `line` are optional settings.
+Use the syntax `funcname,filename:line` to set breakpoint on function _funcname_ found in file _filename_ at line _line_. `filename` and `line` are optional settings.
 
 Use the function name `()` to set breakpoints on anonymous functions.
 
-Line number is the line where the first instruction in a function is defined, or the opening bracket of the function if it was compiled without debuginfo and the first instruction is not local variable declaration. The function breakpoint representing the functions below would be `constructor,script.nut:20` and `(),script.nut:26` (with debuginfo) or `(),script.nut:24` (without debuginfo) respectively.
+Line number is the line where the first instruction in a function is defined, or the opening bracket of the function if it was compiled without debuginfo. The breakpoints representing the functions below would be `constructor,script.nut:20` and `(),script.nut:26` (with debuginfo), or `constructor,script.nut:18` and `(),script.nut:24` (without debuginfo) respectively.
 
 ```
  16
@@ -185,7 +188,7 @@ Available special keywords: `$FUNCTION`, `$CALLER`, `$HITCOUNT`
 
 ### Class definitions
 
-The script function `sqdbg_define_class` is used to display the class name and class instance values in variable views.
+The script function `sqdbg_define_class` is used to display the class name and class instance values in variable views. Data breakpoints can be added on specified custom members.
 
 ```c
 sqdbg_define_class( class, params )
@@ -303,7 +306,7 @@ sqdbg_define_class( IPhysicsObject,
 
 ### Function disassembly
 
-The script function `sqdbg_disassemble` can be used to get information and disassembly of input functions.
+The script function `sqdbg_disassemble` can be used to get information and disassembly of script functions.
 
 Example:
 
@@ -349,7 +352,10 @@ this, org, dir, normal, dist
 
 ### Programmatic breakpoints
 
-The script function `sqdbg_break` can be used to break execution while a client is connected. This can be used to implement assertions instead of throwing exceptions as exceptions are not recoverable.
+Script function         | Description
+------------------------|--------------
+`sqdbg_break`           | Break execution if a client is connected
+`sqdbg_watch`           | Add data breakpoint on expression with optional condition and hit count
 
 ### Profiler
 
@@ -361,8 +367,9 @@ Script function         | Description
 `sqdbg_prof_resume`     | Resume paused profiler. Should be placed in the same call frame as `pause`
 `sqdbg_prof_begin`      | Begin timing named block
 `sqdbg_prof_end`        | End timing block. Should be placed in the same call frame as `begin`
-`sqdbg_prof_get`        | Get profile report of the current or specified thread, or the specified block. Parameter optionally takes a thread, and requires group name or report type (0: call graph, 1: flat). E.g.: `sqdbg_prof_get(1)` or `sqdbg_prof_get(thread, 1)`. Measured peak times are ignored in total and average times in block reports.
-`sqdbg_prof_print`      | Print profile report. Identical to printing each line from `sqdbg_prof_get`
+`sqdbg_prof_reset`      | Reset profile data for all collected data or specified group in optionally specified thread
+`sqdbg_prof_gets`       | Get profile report of the current or specified thread, or the specified block as string. Parameter optionally takes a thread, and requires group name or report type (0: call graph, 1: flat). E.g.: `sqdbg_prof_gets(1)` or `sqdbg_prof_gets(thread, 1)`. Measured peak times are ignored in total and average times in block reports.
+`sqdbg_prof_print`      | Print profile report. Identical to printing each line from `sqdbg_prof_gets`
 
 Example call graph output:
 ```
@@ -464,25 +471,22 @@ If source files are unavailable, you may always use the disassembly view.
 
 ### Function breakpoints
 
-To be able to set named function breakpoints, the functions you want to break into need to have been compiled in the syntax `function MyFunc()` instead of `MyFunc <- function()`. In Squirrel, the former sets the name of the function while the latter creates a nameless, anonymous function - which can be broken into by specifying file name and line number in the anonymous function breakpoint.
+Adding named function breakpoints require the desired functions to be compiled in the syntax `function MyFunc()` instead of `MyFunc <- function()`. In Squirrel, the former sets the name of the function while the latter creates a nameless, anonymous function which can be broken into by specifying file name and line number in the anonymous function breakpoint.
 
 ### Special accessors
 
 Use the keywords `__this`, `__vargv`, `__vargc` in REPL and breakpoint conditions to access current environment and the local vargv respectively. Using `this` and `vargv` in watch and tracepoint expressions will work fine.
 
-### Data breakpoint conditions
+### Data breakpoints
 
-Condition takes a token as prefix; no token assumes strict equality.
+Local variable watches are automatically removed at the end of the scope of the target variable.
 
-Strict (in)equality requires matching type (i.e. float is not equal to integer).
-
-Multiple breakpoints with different conditions can be added on a single variable to match multiple values.
+Condition requires a token as prefix. Strict (in)equality requires matching type (i.e. float is not equal to integer). Multiple breakpoints with different conditions can be added on a single variable to match multiple values.
 
 The condition is compiled at the time and within the stack frame of its creation. Late lookups are not supported.
 
 Token | Description                     | Example input   | Evaluation
 ------|---------------------------------|-----------------|------------------
-none  | equal (strict)                  | `null`          | `data == null`
 `==`  | equal (strict)                  | `== this`       | `data == {table}`
 `!=`  | not equal (strict)              | `!= 0`          | `data != 0`
 `>`   | greater than                    | `> PI * 0.5`    | `data > 1.570796`

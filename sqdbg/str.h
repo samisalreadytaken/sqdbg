@@ -6,31 +6,25 @@
 #ifndef SQDBG_STRING_H
 #define SQDBG_STRING_H
 
-#include "debug.h"
-
 #define STRLEN(s) (sizeof(s) - 1)
 
-#define FMT_UINT32_LEN STRLEN("4294967295")
+#define FMT_UINT32_LEN 10 // 4294967295
+#define FMT_PTR_LEN ( (int)sizeof(void*) * 2 + 2 )
 
 #ifdef _SQ64
-	#define FMT_INT_LEN STRLEN("-9223372036854775808")
-	#define FMT_PTR_LEN 18
-	#define FMT_OCT_LEN STRLEN("01777777777777777777777")
+	#define FMT_INT_LEN 20 // -9223372036854775808
+	#define FMT_OCT_LEN 23 // 01777777777777777777777
 
 	#if defined(_WIN32) || SQUIRREL_VERSION_NUMBER > 223
 		#define FMT_INT "%lld"
-		#define FMT_PTR "0x%016llX"
 	#else
 		#define FMT_INT "%ld"
-		#define FMT_PTR "0x%016lX"
 	#endif
 #else
-	#define FMT_INT_LEN STRLEN("-2147483648")
-	#define FMT_PTR_LEN 10
-	#define FMT_OCT_LEN STRLEN("017777777777")
+	#define FMT_INT_LEN 11 // -2147483648
+	#define FMT_OCT_LEN 12 // 017777777777
 
 	#define FMT_INT "%d"
-	#define FMT_PTR "0x%08X"
 #endif
 
 #ifdef SQUNICODE
@@ -186,34 +180,45 @@ typedef enum
 	kUTFEscapeJSON,
 } EUTFEscape;
 
-inline int IsValidUTF8( unsigned char *src, int srclen );
+inline int IsValidUTF8( unsigned char *src, unsigned int srclen );
 #ifdef SQUNICODE
-inline int IsValidUnicode( const SQChar *src, int srclen );
+inline int IsValidUnicode( const SQChar *src, unsigned int srclen );
 template < bool undoEscape = false >
-inline int UTF8ToSQUnicode( SQChar *dst, int destSize, const char *src, int srclen );
+inline unsigned int UTF8ToSQUnicode( SQChar *dst, unsigned int destSize, const char *src, unsigned int srclen );
 template < EUTFEscape escape = kUTFNoEscape >
-inline int SQUnicodeToUTF8( char *dst, int destSize, const SQChar *src, int srclen );
+inline unsigned int SQUnicodeToUTF8( char *dst, unsigned int destSize, const SQChar *src, unsigned int srclen );
 
-// Returns character length
-inline int SQUnicodeLength( const char *src, int srclen )
+// Returns code unit count
+template < bool undoEscape = false >
+inline unsigned int SQUnicodeLength( const char *src, unsigned int srclen )
 {
-	return UTF8ToSQUnicode( NULL, 0, src, srclen );
+	return UTF8ToSQUnicode< undoEscape >( NULL, 0, src, srclen );
 }
 
 // Returns byte length
 template < EUTFEscape escape = kUTFNoEscape >
-inline int UTF8Length( const SQChar *src, int srclen )
+inline unsigned int UTF8Length( const SQChar *src, unsigned int srclen )
 {
 	return SQUnicodeToUTF8< escape >( NULL, 0, src, srclen );
 }
 #endif
 
-inline int scstombs( char *dst, int destSize, const SQChar *src, int srclen )
+inline unsigned int scstombslen( const SQChar *src, unsigned int srclen )
+{
+#ifdef SQUNICODE
+	return UTF8Length( src, srclen );
+#else
+	(void)src;
+	return srclen;
+#endif
+}
+
+inline unsigned int scstombs( char *dst, unsigned int destSize, const SQChar *src, unsigned int srclen )
 {
 #ifdef SQUNICODE
 	return SQUnicodeToUTF8( dst, destSize, src, srclen );
 #else
-	int len = min( srclen, destSize );
+	unsigned int len = min( srclen, destSize );
 	memcpy( dst, src, len );
 	return len;
 #endif
@@ -224,11 +229,11 @@ inline int scstombs( char *dst, int destSize, const SQChar *src, int srclen )
 struct string_t
 {
 	char *ptr;
-	int len;
+	unsigned int len;
 
 	string_t() {}
 
-	string_t( const char *src, int size ) :
+	string_t( const char *src, unsigned int size ) :
 		ptr((char*)src),
 		len(size)
 	{
@@ -251,7 +256,7 @@ struct string_t
 	{
 		// input wasn't a string literal,
 		// call ( src, size ) constructor instead
-		Assert( (int)strlen(src) == len );
+		Assert( strlen(src) == len );
 	}
 
 	void Strip()
@@ -284,20 +289,6 @@ struct string_t
 		}
 	}
 
-	char *Find( char ch ) const
-	{
-		char *p = ptr;
-		char *end = ptr + len;
-
-		for ( ; p < end; p++ )
-		{
-			if ( *p == ch )
-				return p;
-		}
-
-		return NULL;
-	}
-
 	template < int size >
 	bool StartsWith( const char (&other)[size] ) const
 	{
@@ -324,7 +315,7 @@ struct string_t
 		return false;
 	}
 
-	bool IsEqualTo( const char *other, int size ) const
+	bool IsEqualTo( const char *other, unsigned int size ) const
 	{
 		if ( len == size && *ptr == *other )
 			return !memcmp( ptr, other, size );
@@ -340,34 +331,9 @@ struct string_t
 		return false;
 	}
 
-	bool IsEqualTo( const SQString *other ) const
-	{
 #ifdef SQUNICODE
-		if ( len == other->_len )
-		{
-			Assert( len );
-
-			int i = 0;
-			do
-			{
-				// Used for comparing against locals and outers,
-				// implement unicode conversion if locals can have unicode characters
-				if ( other->_val[i] > 0x7E || (char)other->_val[i] != ptr[i] )
-				{
-					AssertMsg( other->_val[i] <= 0x7E, "not implemented" );
-					return false;
-				}
-			}
-			while ( ++i < len );
-
-			return true;
-		}
-#else
-		if ( len == other->_len && *ptr == *other->_val )
-			return !memcmp( ptr, other->_val, len );
+	bool IsEqualTo( const sqstring_t &other ) const;
 #endif
-		return false;
-	}
 
 	bool IsEmpty() const
 	{
@@ -384,10 +350,10 @@ struct string_t
 	{
 		ptr = (char*)src;
 		len = size - 1;
-		Assert( (int)strlen(src) == len );
+		Assert( strlen(src) == len );
 	}
 
-	void Assign( const char *src, int size )
+	void Assign( const char *src, unsigned int size )
 	{
 		ptr = (char*)src;
 		len = size;
@@ -407,17 +373,11 @@ private:
 	string_t &operator=( const char *src );
 };
 
-struct conststring_t : string_t
-{
-	template < int size >
-	conststring_t( const char (&src)[size] ) : string_t(src) {}
-};
-
 #ifdef SQUNICODE
 struct sqstring_t
 {
 	SQChar *ptr;
-	int len;
+	unsigned int len;
 
 	sqstring_t() {}
 
@@ -427,7 +387,7 @@ struct sqstring_t
 	{
 	}
 
-	sqstring_t( const SQChar *src, int size ) :
+	sqstring_t( const SQChar *src, unsigned int size ) :
 		ptr((SQChar*)src),
 		len(size)
 	{
@@ -438,7 +398,7 @@ struct sqstring_t
 		ptr((SQChar*)src),
 		len(size-1)
 	{
-		Assert( (int)scstrlen(src) == len );
+		Assert( scstrlen(src) == len );
 	}
 
 	bool StartsWith( const string_t &other ) const
@@ -447,7 +407,7 @@ struct sqstring_t
 		{
 			Assert( other.len );
 
-			int i = 0;
+			unsigned int i = 0;
 			do
 			{
 				if ( ptr[i] > 0x7E || other.ptr[i] != (char)ptr[i] )
@@ -490,10 +450,10 @@ struct sqstring_t
 	{
 		ptr = (SQChar*)src;
 		len = size - 1;
-		Assert( (int)scstrlen(src) == len );
+		Assert( scstrlen(src) == len );
 	}
 
-	void Assign( const SQChar *src, int size )
+	void Assign( const SQChar *src, unsigned int size )
 	{
 		ptr = (SQChar*)src;
 		len = size;
@@ -510,13 +470,27 @@ struct sqstring_t
 struct stringbufbase_t
 {
 	char *ptr;
-	int len;
+	unsigned int len;
 	const int size;
 
-	stringbufbase_t( char *src, int size ) :
+	stringbufbase_t( char *src, unsigned int size ) :
 		ptr(src),
 		len(0),
 		size(size)
+	{
+	}
+
+	stringbufbase_t( stringbufbase_t &src ) :
+		ptr(src.ptr),
+		len(src.len),
+		size(src.size)
+	{
+	}
+
+	stringbufbase_t( const stringbufbase_t &src ) :
+		ptr(src.ptr),
+		len(src.len),
+		size(src.size)
 	{
 	}
 
@@ -543,7 +517,8 @@ struct stringbufbase_t
 
 	void Puts( const string_t &str )
 	{
-		int amt = min( BytesLeft(), str.len );
+		Assert( str.len < INT_MAX );
+		int amt = min( BytesLeft(), (int)str.len );
 
 		memcpy( ptr + len, str.ptr, amt );
 		len += amt;
@@ -558,7 +533,8 @@ struct stringbufbase_t
 
 	void Put( char ch )
 	{
-		if ( BufSize() >= len + 1 )
+		Assert( len < INT_MAX );
+		if ( BufSize() >= (int)( len + 1 ) )
 		{
 			ptr[len++] = ch;
 		}
@@ -566,11 +542,11 @@ struct stringbufbase_t
 
 	void Term()
 	{
-		if ( len > BufSize()-1 )
+		if ( (int)len > BufSize()-1 )
 			len = BufSize()-1;
 
 		ptr[len] = 0;
-		Assert( (int)strlen(ptr) == len );
+		Assert( strlen(ptr) == len );
 	}
 
 	template < typename I >
@@ -608,6 +584,33 @@ string_t::string_t( const stringbufbase_t &src ) :
 	len(src.len)
 {
 }
+
+#ifdef SQUNICODE
+bool string_t::IsEqualTo( const sqstring_t &other ) const
+{
+	if ( len == other.len )
+	{
+		Assert( len );
+
+		unsigned int i = 0;
+		do
+		{
+			// Used for comparing against locals and outers,
+			// implement unicode conversion if locals can have unicode characters
+			if ( other.ptr[i] > 0x7E || (char)other.ptr[i] != ptr[i] )
+			{
+				AssertMsg( other.ptr[i] <= 0x7E, "not implemented" );
+				return false;
+			}
+		}
+		while ( ++i < len );
+
+		return true;
+	}
+
+	return false;
+}
+#endif
 
 template < int BUFSIZE >
 struct stringbuf_t : stringbufbase_t
@@ -651,6 +654,7 @@ inline int countdigits( I input )
 template < typename C, typename I >
 inline int printint( C *buf, int size, I value )
 {
+	Assert( buf );
 	Assert( size > 0 );
 
 	if ( !value )
@@ -700,6 +704,7 @@ inline int printint( C *buf, int size, I value )
 template < bool padding, bool prefix, bool uppercase, typename C, typename I >
 inline int printhex( C *buf, int size, I value )
 {
+	Assert( buf );
 	Assert( size > 0 );
 
 	int len = ( prefix ? 2 : 0 ) + ( padding ? sizeof(I) * 2 : countdigits<16>( value ) );
@@ -721,21 +726,16 @@ inline int printhex( C *buf, int size, I value )
 	{
 		while ( i >= ( prefix ? 2 : 0 ) )
 			buf[i--] = '0';
+	}
 
-		if ( prefix )
+	if ( prefix )
+	{
+		if ( i >= 0 )
 		{
 			buf[i--] = 'x';
-			buf[i--] = '0';
-		}
-	}
-	else
-	{
-		if ( prefix )
-		{
-			buf[0] = '0';
-			buf[1] = 'x';
-			i--;
-			i--;
+
+			if ( i == 0 )
+				buf[i--] = '0';
 		}
 	}
 
@@ -746,6 +746,7 @@ inline int printhex( C *buf, int size, I value )
 template < typename C, typename I >
 inline int printoct( C *buf, int size, I value )
 {
+	Assert( buf );
 	Assert( size > 0 );
 
 	int len = countdigits<8>( value ) + 1;
@@ -870,10 +871,23 @@ inline bool atoo( string_t str, I *out )
 	return true;
 }
 
+template < typename I >
+inline bool strtoint( string_t str, I *out )
+{
+	if ( !str.StartsWith("0x") )
+	{
+		return atoi( str, out );
+	}
+	else
+	{
+		return atox( str, out );
+	}
+}
+
 // Returns byte count of valid UTF8 sequences
 // Returns 0 for control characters
 // Returns 0 for noncharacters
-inline int IsValidUTF8( unsigned char *src, int srclen )
+inline int IsValidUTF8( unsigned char *src, unsigned int srclen )
 {
 	unsigned char cp = src[0];
 
@@ -942,7 +956,7 @@ inline int IsValidUTF8( unsigned char *src, int srclen )
 // Returns 0 for control characters
 // Returns -1 if the invalid code unit is larger than 1 byte
 // Noncharacters and private use areas are valid
-inline int IsValidUnicode( const SQChar *src, int srclen )
+inline int IsValidUnicode( const SQChar *src, unsigned int srclen )
 {
 	uint32_t cp = (uint32_t)src[0];
 
@@ -1009,11 +1023,11 @@ inline int IsValidUnicode( const SQChar *src, int srclen )
 }
 
 template < bool undoEscape >
-inline int UTF8ToSQUnicode( SQChar *dst, int destSize, const char *src, int srclen )
+inline unsigned int UTF8ToSQUnicode( SQChar *dst, unsigned int destSize, const char *src, unsigned int srclen )
 {
 	uint32_t cp;
 	const char *end = src + srclen;
-	int count = 0;
+	unsigned int count = 0;
 
 	for ( ; src < end; src++ )
 	{
@@ -1038,7 +1052,7 @@ inline int UTF8ToSQUnicode( SQChar *dst, int destSize, const char *src, int srcl
 						{
 							if ( src + sizeof(SQChar) * 2 + 1 < end )
 							{
-								Verify( atox( { src + 2, (int)sizeof(SQChar) * 2 }, &cp ) );
+								Verify( atox( { src + 2, sizeof(SQChar) * 2 }, &cp ) );
 								src += sizeof(SQChar) * 2 + 1;
 							}
 
@@ -1048,7 +1062,7 @@ inline int UTF8ToSQUnicode( SQChar *dst, int destSize, const char *src, int srcl
 						{
 							if ( src + sizeof(uint16_t) * 2 + 1 < end )
 							{
-								Verify( atox( { src + 2, (int)sizeof(uint16_t) * 2 }, &cp ) );
+								Verify( atox( { src + 2, sizeof(uint16_t) * 2 }, &cp ) );
 								src += sizeof(uint16_t) * 2 + 1;
 							}
 
@@ -1102,7 +1116,7 @@ xffff:
 supplementary:
 		if ( dst )
 		{
-			if ( destSize >= (int)sizeof(SQChar) )
+			if ( destSize >= sizeof(SQChar) )
 			{
 				*dst++ = cp;
 				destSize -= sizeof(SQChar);
@@ -1124,7 +1138,7 @@ supplementary:
 xffff:
 		if ( dst )
 		{
-			if ( destSize >= (int)sizeof(SQChar) )
+			if ( destSize >= sizeof(SQChar) )
 			{
 				*dst++ = (SQChar)cp;
 				destSize -= sizeof(SQChar);
@@ -1146,7 +1160,7 @@ xffff:
 supplementary:
 		if ( dst )
 		{
-			if ( destSize > (int)sizeof(SQChar) )
+			if ( destSize > sizeof(SQChar) )
 			{
 				UTF16_SURROGATE_FROM_UTF32( dst, cp );
 				dst += 2;
@@ -1173,7 +1187,7 @@ supplementary:
 
 // SQUnicode can be UTF16 or UTF32
 template < EUTFEscape escape >
-inline int SQUnicodeToUTF8( char *dst, int destSize, const SQChar *src, int srclen )
+inline unsigned int SQUnicodeToUTF8( char *dst, unsigned int destSize, const SQChar *src, unsigned int srclen )
 {
 	uint32_t cp;
 	const SQChar *end = src + srclen;
@@ -1185,8 +1199,8 @@ inline int SQUnicodeToUTF8( char *dst, int destSize, const SQChar *src, int srcl
 			// kUTFEscape
 			12 ) ) : // "\uD800\uDC00"
 		4 ];
-	int count = 0;
-	int bytes;
+	unsigned int count = 0;
+	unsigned int bytes;
 
 	if ( escape == kUTFEscapeQuoted )
 	{

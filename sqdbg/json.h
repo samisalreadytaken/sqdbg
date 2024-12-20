@@ -6,257 +6,158 @@
 #ifndef SQDBG_JSON_H
 #define SQDBG_JSON_H
 
-#include <new>
-#include <squirrel.h>
-#include "vec.h"
-#include "str.h"
+// Most messages are going to require less than 256 bytes,
+// only approaching 1024 on large breakpoint requests
+#define JSON_SCRATCH_CHUNK_SIZE 1024
 
 typedef enum
 {
 	JSON_NULL			= 0x0000,
-	JSON_INTEGER		= 0x0001,
-	JSON_FLOAT			= 0x0002,
-	JSON_STRING			= 0x0004,
-#ifdef SQUNICODE
-	JSON_WSTRING		= 0x0008,
-#endif
+	JSON_BOOL			= 0x0001,
+	JSON_INTEGER		= 0x0002,
+	JSON_FLOAT			= 0x0004,
+	JSON_STRING			= 0x0008,
 	JSON_TABLE			= 0x0010,
 	JSON_ARRAY			= 0x0020,
-	JSON_BOOL			= 0x0040,
-	_JSON_ALLOCATED		= 0x0080,
-	_JSON_QUOTED		= 0x0100
 } JSONTYPE;
 
 class json_table_t;
 class json_array_t;
 struct json_value_t;
 
-static inline json_table_t *CreateTable( int reserve );
-static inline json_array_t *CreateArray( int reserve );
-static inline void DeleteTable( json_table_t *p );
-static inline void DeleteArray( json_array_t *p );
-static inline void FreeValue( json_value_t *val );
+struct ostr_t
+{
+	// ushort can handle strings that fit the recv net buf,
+	// use a larger type for validation of sent messages in the send net buf
+#ifdef SQDBG_VALIDATE_SENT_MSG
+	typedef unsigned int index_t;
+#else
+	typedef unsigned short index_t;
+#endif
+
+	index_t ofs;
+	index_t len;
+};
 
 struct json_value_t
 {
-	json_value_t() {}
-
 	union
 	{
-		string_t _string;
-#ifdef SQUNICODE
-		sqstring_t _wstring;
-#endif
+		ostr_t _string;
 		int _integer;
-		SQFloat _float;
 		json_table_t *_table;
 		json_array_t *_array;
 	};
 
 	int type;
-
-	int IsType( int t ) const
-	{
-		return type & t;
-	}
-
-	int GetType() const
-	{
-		return type & ~(_JSON_ALLOCATED | _JSON_QUOTED);
-	}
-
-	string_t &AsString()
-	{
-		Assert( type & JSON_STRING );
-		return _string;
-	}
-
-	json_table_t &AsTable()
-	{
-		Assert( type & JSON_TABLE );
-		return *_table;
-	}
 };
 
 struct json_field_t
 {
-	string_t key;
+	ostr_t key;
 	json_value_t val;
 };
 
 class json_array_t
 {
-private:
-	typedef vector< json_value_t > array_t;
-	array_t value;
-
-	void clear()
-	{
-		for ( int i = value.size(); i--; )
-		{
-			json_value_t &elem = value._base[i];
-
-			if ( elem.IsType( _JSON_ALLOCATED ) )
-			{
-				FreeValue( &elem );
-			}
-
-			value.pop();
-		}
-	}
-
 public:
-	json_array_t() {}
+	const char *m_pBase;
+	CScratch< JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
+	int *m_Elements;
+	unsigned short m_nElementCount;
+	unsigned short m_nElementsSize;
 
-	json_array_t( int reserve )
+	void Init( const char *base, CScratch< JSON_SCRATCH_CHUNK_SIZE > *allocator )
 	{
-		if ( reserve )
-			value.reserve( reserve );
-	}
-
-	~json_array_t()
-	{
-		clear();
-	}
-
-	int size() const
-	{
-		return value.size();
-	}
-
-	int capacity() const
-	{
-		return value.capacity();
-	}
-
-	void remove( int i )
-	{
-		value.remove(i);
-	}
-
-	void reserve( int i )
-	{
-		if ( i > value.capacity() )
-			value.reserve(i);
-	}
-
-	json_value_t *Get( int i )
-	{
-		Assert( i >= 0 && i < value.size() );
-		return &value._base[i];
+		m_pBase = base;
+		m_Allocator = allocator;
+		m_nElementCount = 0;
+		m_nElementsSize = 0;
 	}
 
 	json_value_t *NewElement()
 	{
-		json_value_t &ret = value.append();
-		memzero( &ret );
-		return &ret;
-	}
-
-	json_table_t &AppendTable( int reserve = 0 )
-	{
-		json_value_t &elem = value.append();
-
-		elem.type = JSON_TABLE | _JSON_ALLOCATED;
-		elem._table = CreateTable( reserve );
-
-		return *elem._table;
-	}
-
-	void Append( json_table_t &t )
-	{
-		json_value_t &elem = value.append();
-		elem.type = JSON_TABLE;
-		elem._table = &t;
-	}
-
-	void Append( int val )
-	{
-		json_value_t &elem = value.append();
-		elem.type = JSON_INTEGER;
-		elem._integer = val;
-	}
-
-	void Append( const string_t &val )
-	{
-		json_value_t &elem = value.append();
-		elem.type = JSON_STRING;
-		elem._string = val;
-	}
-
-#ifdef SQUNICODE
-	void Append( const sqstring_t &val )
-	{
-		json_value_t &elem = value.append();
-		elem.type = JSON_WSTRING;
-		elem._wstring = val;
-	}
-#endif
-};
-
-class json_table_t
-{
-private:
-	typedef vector< json_field_t > table_t;
-	table_t value;
-
-	void clear()
-	{
-		for ( int i = value.size(); i--; )
+		if ( m_nElementCount == m_nElementsSize )
 		{
-			json_value_t &val = value._base[i].val;
+			// doesn't free old ptr, this is an uncommon operation and extra allocation is fine
+			int oldsize = m_nElementsSize;
+			int *oldptr = m_Elements;
 
-			if ( val.IsType( _JSON_ALLOCATED ) )
-			{
-				FreeValue( &val );
-			}
+			m_nElementsSize = !m_nElementsSize ? 8 : ( m_nElementsSize << 1 );
+			m_Elements = (int*)m_Allocator->Alloc( m_nElementsSize * sizeof(int) );
 
-			value.pop();
+			if ( oldsize )
+				memcpy( m_Elements, oldptr, oldsize * sizeof(int) );
 		}
-	}
 
-public:
-	json_table_t() {}
-
-	json_table_t( int reserve )
-	{
-		if ( reserve )
-			value.reserve( reserve );
-	}
-
-	~json_table_t()
-	{
-		clear();
+		int index;
+		json_value_t *ret = (json_value_t*)m_Allocator->Alloc( sizeof(json_value_t), &index );
+		m_Elements[ m_nElementCount++ ] = index;
+		return ret;
 	}
 
 	int size() const
 	{
-		return value.size();
+		return m_nElementCount;
 	}
 
-	int capacity() const
+	bool GetString( int i, string_t *out )
 	{
-		return value.capacity();
+		Assert( m_nElementCount );
+		Assert( i >= 0 && i < m_nElementCount );
+
+		json_value_t *val = (json_value_t*)m_Allocator->Get( m_Elements[i] );
+
+		if ( val->type & JSON_STRING )
+		{
+			out->Assign( m_pBase + val->_string.ofs, val->_string.len );
+			return true;
+		}
+
+		return false;
 	}
 
-	void reserve( int i )
+	bool GetTable( int i, json_table_t **out )
 	{
-		if ( i > value.capacity() )
-			value.reserve(i);
-	}
+		Assert( m_nElementCount );
+		Assert( i >= 0 && i < m_nElementCount );
 
-	json_field_t *Get( int i )
+		json_value_t *val = (json_value_t*)m_Allocator->Get( m_Elements[i] );
+
+		if ( val->type & JSON_TABLE )
+		{
+			*out = val->_table;
+			return true;
+		}
+
+		return false;
+	}
+};
+
+class json_table_t
+{
+public:
+	const char *m_pBase;
+	CScratch< JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
+	int *m_Elements;
+	unsigned short m_nElementCount;
+	unsigned short m_nElementsSize;
+
+	void Init( const char *base, CScratch< JSON_SCRATCH_CHUNK_SIZE > *allocator )
 	{
-		Assert( i >= 0 && i < value.size() );
-		return &value._base[i];
+		m_pBase = base;
+		m_Allocator = allocator;
+		m_nElementCount = 0;
+		m_nElementsSize = 0;
 	}
 
 	json_value_t *Get( const string_t &key )
 	{
-		for ( int i = 0; i < value.size(); i++ )
+		for ( int i = 0; i < m_nElementCount; i++ )
 		{
-			json_field_t *kv = &value._base[i];
-			if ( kv->key.IsEqualTo( key ) )
+			json_field_t *kv = (json_field_t*)m_Allocator->Get( m_Elements[i] );
+
+			if ( key.IsEqualTo( m_pBase + kv->key.ofs, kv->key.len ) )
 				return &kv->val;
 		}
 
@@ -268,29 +169,24 @@ public:
 		return const_cast< json_table_t * >( this )->Get( key );
 	}
 
-	json_value_t *GetOrCreate( const string_t &key )
-	{
-		json_value_t *val = Get( key );
-
-		if ( !val )
-		{
-			json_field_t *kv = NewElement();
-			kv->key = key;
-			val = &kv->val;
-		}
-		else if ( val->IsType( _JSON_ALLOCATED ) )
-		{
-			FreeValue( val );
-		}
-
-		return val;
-	}
-
 	json_field_t *NewElement()
 	{
-		json_field_t &ret = value.append();
-		memzero( &ret );
-		return &ret;
+		if ( m_nElementCount == m_nElementsSize )
+		{
+			int oldsize = m_nElementsSize;
+			int *oldptr = m_Elements;
+
+			m_nElementsSize = !m_nElementsSize ? 8 : ( m_nElementsSize << 1 );
+			m_Elements = (int*)m_Allocator->Alloc( m_nElementsSize * sizeof(int) );
+
+			if ( oldsize )
+				memcpy( m_Elements, oldptr, oldsize * sizeof(int) );
+		}
+
+		int index;
+		json_field_t *ret = (json_field_t*)m_Allocator->Alloc( sizeof(json_field_t), &index );
+		m_Elements[ m_nElementCount++ ] = index;
+		return ret;
 	}
 
 	bool GetBool( const string_t &key, bool *out ) const
@@ -321,27 +217,13 @@ public:
 		return false;
 	}
 
-	bool GetFloat( const string_t &key, float *out, float defaultVal = 0.0f ) const
-	{
-		json_value_t *kval = Get( key );
-
-		if ( kval && ( kval->type & JSON_FLOAT ) )
-		{
-			*out = kval->_float;
-			return true;
-		}
-
-		*out = defaultVal;
-		return false;
-	}
-
 	bool GetString( const string_t &key, string_t *out, const char *defaultVal = "" ) const
 	{
 		json_value_t *kval = Get( key );
 
 		if ( kval && ( kval->type & JSON_STRING ) )
 		{
-			*out = kval->_string;
+			out->Assign( m_pBase + kval->_string.ofs, kval->_string.len );
 			return true;
 		}
 
@@ -377,615 +259,425 @@ public:
 		return false;
 	}
 
-	void SetNull( const string_t &key )
-	{
-		json_value_t *kval = GetOrCreate( key );
+	bool Get( const string_t &key, bool *out ) const { return GetBool( key, out ); }
+	bool Get( const string_t &key, int *out ) const { return GetInt( key, out ); }
+	bool Get( const string_t &key, string_t *out ) const { return GetString( key, out ); }
+	bool Get( const string_t &key, json_table_t **out ) const { return GetTable( key, out ); }
+	bool Get( const string_t &key, json_array_t **out ) const { return GetArray( key, out ); }
+};
 
-		kval->type = JSON_NULL;
+static inline void PutStrL( CBuffer *buffer, const string_t &str )
+{
+	buffer->_base.Ensure( buffer->size() + str.len );
+	memcpy( buffer->base() + buffer->size(), str.ptr, str.len );
+	buffer->_size += str.len;
+}
+
+static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
+{
+	const char *c = str.ptr;
+	unsigned int i = str.len;
+
+	unsigned int len = 2 + i;
+
+	if ( quote )
+		len += 4;
+
+	for ( ; i--; c++ )
+	{
+		switch ( *c )
+		{
+			case '\"': case '\\': case '\b':
+			case '\f': case '\n': case '\r': case '\t':
+				len++;
+				if ( quote )
+				{
+					len++;
+					if ( *c == '\"' || *c == '\\' )
+						len++;
+				}
+				break;
+			default:
+				if ( !IN_RANGE_CHAR( *(unsigned char*)c, 0x20, 0x7E ) )
+				{
+					int ret = IsValidUTF8( (unsigned char*)c, i + 1 );
+					if ( ret != 0 )
+					{
+						i -= ret - 1;
+						c += ret - 1;
+					}
+					else
+					{
+						if ( !quote )
+						{
+							len += sizeof(uint16_t) * 2 + 1;
+						}
+						else
+						{
+							len += sizeof(SQChar) * 2 + 2;
+						}
+					}
+				}
+		}
 	}
 
-	void SetBool( const string_t &key, bool val )
-	{
-		json_value_t *kval = GetOrCreate( key );
+	buffer->_base.Ensure( buffer->size() + len );
 
-		kval->type = JSON_BOOL;
-		kval->_integer = val;
+	char *mem = buffer->base();
+	unsigned int idx = buffer->size();
+
+	c = str.ptr;
+	i = str.len;
+
+	mem[idx++] = '\"';
+
+	if ( quote )
+	{
+		mem[idx++] = '\\';
+		mem[idx++] = '\"';
 	}
 
-	template < typename T >
-	void SetInt( const string_t &key, T *val )
+	for ( ; i--; c++ )
 	{
-		SetInt( key, (int)val );
+		mem[idx++] = *c;
+
+		switch ( *c )
+		{
+			case '\"':
+				mem[idx-1] = '\\';
+				if ( quote )
+				{
+					mem[idx++] = '\\';
+					mem[idx++] = '\\';
+				}
+				mem[idx++] = '\"';
+				break;
+			case '\\':
+				if ( quote )
+				{
+					mem[idx++] = '\\';
+					mem[idx++] = '\\';
+				}
+				mem[idx++] = '\\';
+				break;
+			case '\b':
+				mem[idx-1] = '\\';
+				if ( quote )
+					mem[idx++] = '\\';
+				mem[idx++] = 'b';
+				break;
+			case '\f':
+				mem[idx-1] = '\\';
+				if ( quote )
+					mem[idx++] = '\\';
+				mem[idx++] = 'f';
+				break;
+			case '\n':
+				mem[idx-1] = '\\';
+				if ( quote )
+					mem[idx++] = '\\';
+				mem[idx++] = 'n';
+				break;
+			case '\r':
+				mem[idx-1] = '\\';
+				if ( quote )
+					mem[idx++] = '\\';
+				mem[idx++] = 'r';
+				break;
+			case '\t':
+				mem[idx-1] = '\\';
+				if ( quote )
+					mem[idx++] = '\\';
+				mem[idx++] = 't';
+				break;
+			default:
+				if ( !IN_RANGE_CHAR( *(unsigned char*)c, 0x20, 0x7E ) )
+				{
+					int ret = IsValidUTF8( (unsigned char*)c, i + 1 );
+					if ( ret != 0 )
+					{
+						memcpy( mem + idx, c + 1, ret - 1 );
+						idx += ret - 1;
+						i -= ret - 1;
+						c += ret - 1;
+					}
+					else
+					{
+						mem[idx-1] = '\\';
+
+						if ( !quote )
+						{
+							mem[idx++] = 'u';
+							idx += printhex< true, false >(
+									mem + idx,
+									buffer->capacity() - idx,
+									(uint16_t)*(unsigned char*)c );
+						}
+						else
+						{
+							mem[idx++] = '\\';
+							mem[idx++] = 'x';
+							idx += printhex< true, false >(
+									mem + idx,
+									buffer->capacity() - idx,
+									(SQChar)*(unsigned char*)c );
+						}
+					}
+				}
+		}
+	}
+
+	if ( quote )
+	{
+		mem[idx++] = '\\';
+		mem[idx++] = '\"';
+	}
+
+	mem[idx++] = '\"';
+
+	buffer->_size = idx;
+}
+
+#ifdef SQUNICODE
+static inline void PutStr( CBuffer *buffer, const sqstring_t &str, bool quote )
+{
+	unsigned int len;
+
+	if ( !quote )
+	{
+		len = 2 + UTF8Length< kUTFEscapeJSON >( str.ptr, str.len );
+	}
+	else
+	{
+		len = 2 + UTF8Length< kUTFEscapeQuoted >( str.ptr, str.len );
+	}
+
+	buffer->_base.Ensure( buffer->size() + len );
+	buffer->base()[buffer->_size++] = '\"';
+
+	if ( !quote )
+	{
+		len = SQUnicodeToUTF8< kUTFEscapeJSON >(
+				buffer->base() + buffer->size(),
+				buffer->capacity() - buffer->size(),
+				str.ptr,
+				str.len );
+	}
+	else
+	{
+		len = SQUnicodeToUTF8< kUTFEscapeQuoted >(
+				buffer->base() + buffer->size(),
+				buffer->capacity() - buffer->size(),
+				str.ptr,
+				str.len );
+	}
+
+	buffer->_size += len;
+	buffer->base()[buffer->_size++] = '\"';
+}
+#endif
+
+static inline void PutChar( CBuffer *buffer, char c )
+{
+	buffer->_base.Ensure( buffer->size() + 1 );
+	buffer->base()[buffer->_size++] = c;
+}
+
+template < typename I >
+static inline void PutInt( CBuffer *buffer, I val, bool hex = false )
+{
+	int len;
+	buffer->_base.Ensure( buffer->size() + countdigits( val ) + 1 );
+
+	if ( !hex )
+	{
+		len = printint( buffer->base() + buffer->size(), buffer->capacity() - buffer->size(), val );
+	}
+	else
+	{
+		len = printhex< false >( buffer->base() + buffer->size(), buffer->capacity() - buffer->size(), val );
+	}
+
+	buffer->_size += len;
+}
+
+class wjson_table_t;
+class wjson_array_t;
+
+class wjson_t
+{
+public:
+	CBuffer *m_pBuffer;
+	int m_nElementCount;
+
+	wjson_t( CBuffer *b ) :
+		m_pBuffer(b),
+		m_nElementCount(0)
+	{
+	}
+};
+
+class wjson_table_t : public wjson_t
+{
+public:
+	wjson_table_t( CBuffer &b ) : wjson_t(&b)
+	{
+		PutChar( m_pBuffer, '{' );
+	}
+
+	~wjson_table_t()
+	{
+		PutChar( m_pBuffer, '}' );
+	}
+
+	wjson_table_t( const wjson_t &src ) : wjson_t(src)
+	{
+	}
+
+	wjson_table_t( const wjson_table_t &src );
+
+	void PutKey( const string_t &key )
+	{
+		if ( m_nElementCount++ )
+			PutChar( m_pBuffer, ',' );
+
+		PutChar( m_pBuffer, '\"' );
+		PutStrL( m_pBuffer, key );
+		PutChar( m_pBuffer, '\"' );
+		PutChar( m_pBuffer, ':' );
 	}
 
 	void SetInt( const string_t &key, int val )
 	{
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_INTEGER;
-		kval->_integer = val;
+		PutKey( key );
+		PutInt( m_pBuffer, val );
 	}
 
-	void SetFloat( const string_t &key, float val )
+	void SetNull( const string_t &key )
 	{
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_FLOAT;
-		kval->_float = val;
+		PutKey( key );
+		PutStrL( m_pBuffer, "null" );
 	}
 
-	void SetIntString( const string_t &key, int val )
+	void SetBool( const string_t &key, bool val )
 	{
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_INTEGER | _JSON_QUOTED;
-		kval->_integer = val;
+		PutKey( key );
+		PutStrL( m_pBuffer, val ? string_t("true") : string_t("false") );
 	}
 
-	template < int size >
-	void SetString( const string_t &key, const char (&val)[size] )
+	void SetString( const string_t &key, const string_t &val, bool quote = false )
 	{
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_STRING;
-		kval->_string.Assign( val, size - 1 );
-	}
-
-	void SetString( const string_t &key, SQString *val, bool quote = false )
-	{
-		SetStringNoCopy( key, { val->_val, (int)val->_len }, quote );
-	}
-
-	void SetString( const string_t &key, const conststring_t &val )
-	{
-		SetStringNoCopy( key, val );
-	}
-
-	void SetString( const string_t &key, const string_t &val )
-	{
-		Assert( val.ptr );
-
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_STRING | _JSON_ALLOCATED;
-		CopyString( val, &kval->_string );
-	}
-
-	void SetStringNoCopy( const string_t &key, const string_t &val, bool quote = false )
-	{
-		Assert( val.ptr );
-
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_STRING;
-		kval->_string = val;
-
-		if ( quote )
-			kval->type |= _JSON_QUOTED;
-	}
-
-	// Calls FreeString on release,
-	// assumes len + 1 bytes allocated
-	void SetStringExternal( const string_t &key, const string_t &val )
-	{
-		Assert( val.ptr );
-
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_STRING | _JSON_ALLOCATED;
-		kval->_string = val;
+		PutKey( key );
+		PutStr( m_pBuffer, val, quote );
 	}
 
 #ifdef SQUNICODE
-	void SetStringNoCopy( const string_t &key, const sqstring_t &val, bool quote = false )
+	void SetString( const string_t &key, const sqstring_t &val, bool quote = false )
 	{
-		Assert( val.ptr );
-
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_WSTRING;
-		kval->_wstring = val;
-
-		if ( quote )
-			kval->type |= _JSON_QUOTED;
-	}
-
-	void SetString( const string_t &key, const sqstring_t &val )
-	{
-		Assert( val.ptr );
-
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_STRING | _JSON_ALLOCATED;
-		CopyString( val, &kval->_string );
+		PutKey( key );
+		PutStr( m_pBuffer, val, quote );
 	}
 #endif
 
-	json_table_t &SetTable( const string_t &key, int reserve = 0 )
+	void SetIntString( const string_t &key, int val )
 	{
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_TABLE | _JSON_ALLOCATED;
-		kval->_table = CreateTable( reserve );
-
-		return *kval->_table;
+		PutKey( key );
+		PutChar( m_pBuffer, '\"' );
+		PutInt( m_pBuffer, val );
+		PutChar( m_pBuffer, '\"' );
 	}
 
-	json_array_t &SetArray( const string_t &key, int reserve = 0 )
+	template < typename I >
+	void SetIntBrackets( const string_t &key, I val, bool hex = false )
 	{
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_ARRAY | _JSON_ALLOCATED;
-		kval->_array = CreateArray( reserve );
-
-		return *kval->_array;
+		PutKey( key );
+		PutChar( m_pBuffer, '\"' );
+		PutChar( m_pBuffer, '[' );
+		PutInt( m_pBuffer, val, hex );
+		PutChar( m_pBuffer, ']' );
+		PutChar( m_pBuffer, '\"' );
 	}
 
-	void SetTable( const string_t &key, json_table_t &val )
+	wjson_t SetArray( const string_t &key )
 	{
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_TABLE;
-		kval->_table = &val;
+		PutKey( key );
+		PutChar( m_pBuffer, '[' );
+		return { m_pBuffer };
 	}
 
-	void SetArray( const string_t &key, json_array_t &val )
+	wjson_t SetTable( const string_t &key )
 	{
-		json_value_t *kval = GetOrCreate( key );
-
-		kval->type = JSON_ARRAY;
-		kval->_array = &val;
+		PutKey( key );
+		PutChar( m_pBuffer, '{' );
+		return { m_pBuffer };
 	}
 
 	void Set( const string_t &key, bool val ) { SetBool( key, val ); }
 	void Set( const string_t &key, int val ) { SetInt( key, val ); }
 	void Set( const string_t &key, unsigned int val ) { SetInt( key, val ); }
-	void Set( const string_t &key, float val ) { SetFloat( key, val ); }
 	void Set( const string_t &key, const string_t &val ) { SetString( key, val ); }
-
-	bool Get( const string_t &key, bool *out ) const { return GetBool( key, out ); }
-	bool Get( const string_t &key, int *out, int defaultVal = 0 ) const { return GetInt( key, out, defaultVal ); }
-	bool Get( const string_t &key, float *out, float defaultVal = 0.0f ) const { return GetFloat( key, out, defaultVal ); }
-	bool Get( const string_t &key, string_t *out, const char *defaultVal = "" ) const { return GetString( key, out, defaultVal ); }
-	bool Get( const string_t &key, json_table_t **out ) const { return GetTable( key, out ); }
-	bool Get( const string_t &key, json_array_t **out ) const { return GetArray( key, out ); }
-
-private:
-	template < typename T > void Set( const string_t &, T* );
-	template < typename T > void Set( const string_t &, T );
-	template < typename T > void SetBool( const string_t &, T );
 };
 
-inline json_table_t *CreateTable( int reserve )
+class wjson_array_t : public wjson_t
 {
-	json_table_t *ret = (json_table_t *)sqdbg_malloc( sizeof(json_table_t) );
-	new (ret) json_table_t( reserve );
-	return ret;
-}
-
-inline json_array_t *CreateArray( int reserve )
-{
-	json_array_t *ret = (json_array_t *)sqdbg_malloc( sizeof(json_array_t) );
-	new (ret) json_array_t( reserve );
-	return ret;
-}
-
-inline void DeleteTable( json_table_t *p )
-{
-	p->~json_table_t();
-	sqdbg_free( p, sizeof(json_table_t) );
-}
-
-inline void DeleteArray( json_array_t *p )
-{
-	p->~json_array_t();
-	sqdbg_free( p, sizeof(json_array_t) );
-}
-
-inline void FreeValue( json_value_t *val )
-{
-	Assert( val->IsType( _JSON_ALLOCATED ) );
-
-	switch ( val->GetType() )
+public:
+	wjson_array_t( CBuffer &b ) : wjson_t(&b)
 	{
-		case JSON_STRING:
-		{
-			FreeString( &val->_string );
-			break;
-		}
-#ifdef SQUNICODE
-		case JSON_WSTRING:
-		{
-			FreeString( &val->_wstring );
-			break;
-		}
-#endif
-		case JSON_TABLE:
-		{
-			DeleteTable( val->_table );
-			break;
-		}
-		case JSON_ARRAY:
-		{
-			DeleteArray( val->_array );
-			break;
-		}
-		default: UNREACHABLE();
-	}
-}
-
-inline int GetJSONStringSize( const json_value_t &obj )
-{
-	int len;
-
-	switch ( obj.GetType() )
-	{
-		case JSON_STRING:
-		{
-			len = 2 + obj._string.len; // "val"
-
-			if ( obj.IsType( _JSON_QUOTED ) )
-				len += 4;
-
-			const char *c = obj._string.ptr;
-			for ( int i = obj._string.len; i--; c++ )
-			{
-				switch ( *c )
-				{
-					case '\"': case '\\': case '\b':
-					case '\f': case '\n': case '\r': case '\t':
-						len++;
-						if ( obj.IsType( _JSON_QUOTED ) )
-						{
-							len++;
-							if ( *c == '\"' || *c == '\\' )
-								len++;
-						}
-						break;
-					default:
-						if ( !IN_RANGE_CHAR( *(unsigned char*)c, 0x20, 0x7E ) )
-						{
-							int ret = IsValidUTF8( (unsigned char*)c, i + 1 );
-							if ( ret != 0 )
-							{
-								i -= ret - 1;
-								c += ret - 1;
-							}
-							else
-							{
-								if ( !obj.IsType( _JSON_QUOTED ) )
-								{
-									len += sizeof(uint16_t) * 2 + 1;
-								}
-								else
-								{
-									len += sizeof(SQChar) * 2 + 2;
-								}
-							}
-						}
-				}
-			}
-
-			break;
-		}
-#ifdef SQUNICODE
-		case JSON_WSTRING:
-		{
-			if ( !obj.IsType( _JSON_QUOTED ) )
-			{
-				len = 2 + UTF8Length< kUTFEscapeJSON >( obj._wstring.ptr, obj._wstring.len );
-			}
-			else
-			{
-				len = 2 + UTF8Length< kUTFEscapeQuoted >( obj._wstring.ptr, obj._wstring.len );
-			}
-
-			break;
-		}
-#endif
-		case JSON_INTEGER:
-		{
-			if ( obj._integer > 0 )
-			{
-				len = countdigits( obj._integer );
-			}
-			else if ( obj._integer )
-			{
-				len = countdigits( -obj._integer ) + 1;
-			}
-			else
-			{
-				len = 1; // 0
-			}
-
-			if ( obj.IsType( _JSON_QUOTED ) )
-				len += 2;
-
-			break;
-		}
-		case JSON_FLOAT:
-		{
-			char tmp[ FMT_FLT_LEN + 1 ];
-			len = snprintf( tmp, sizeof(tmp), "%f", obj._float );
-			break;
-		}
-		case JSON_BOOL:
-		{
-			len = obj._integer ? STRLEN("true") : STRLEN("false");
-			break;
-		}
-		case JSON_NULL:
-		{
-			len = STRLEN("null");
-			break;
-		}
-		case JSON_TABLE:
-		{
-			len = 2; // {}
-
-			if ( obj._table->size() )
-			{
-				for ( int i = 0; i < obj._table->size(); i++ )
-				{
-					const json_field_t *kv = obj._table->Get(i);
-					len += 2 + kv->key.len + 1 + GetJSONStringSize( kv->val ) + 1; // "key":val,
-				}
-
-				len--; // trailing comma
-			}
-
-			break;
-		}
-		case JSON_ARRAY:
-		{
-			len = 2; // []
-
-			if ( obj._array->size() )
-			{
-				for ( int i = 0; i < obj._array->size(); i++ )
-					len += GetJSONStringSize( *obj._array->Get(i) ) + 1;
-
-				len--; // trailing comma
-			}
-
-			break;
-		}
-		default: UNREACHABLE();
+		PutChar( m_pBuffer, '[' );
 	}
 
-	return len;
-}
-
-inline int JSONStringify( const json_value_t &obj, char *mem, int size, int idx )
-{
-	switch ( obj.GetType() )
+	~wjson_array_t()
 	{
-		case JSON_STRING:
-		{
-			mem[idx++] = '\"';
-
-			if ( obj.IsType( _JSON_QUOTED ) )
-			{
-				mem[idx++] = '\\';
-				mem[idx++] = '\"';
-			}
-
-			const char *c = obj._string.ptr;
-			for ( int i = obj._string.len; i--; c++ )
-			{
-				mem[idx++] = *c;
-
-				switch ( *c )
-				{
-					case '\"':
-						mem[idx-1] = '\\';
-						if ( obj.IsType( _JSON_QUOTED ) )
-						{
-							mem[idx++] = '\\';
-							mem[idx++] = '\\';
-						}
-						mem[idx++] = '\"';
-						break;
-					case '\\':
-						if ( obj.IsType( _JSON_QUOTED ) )
-						{
-							mem[idx++] = '\\';
-							mem[idx++] = '\\';
-						}
-						mem[idx++] = '\\';
-						break;
-					case '\b':
-						mem[idx-1] = '\\';
-						if ( obj.IsType( _JSON_QUOTED ) )
-							mem[idx++] = '\\';
-						mem[idx++] = 'b';
-						break;
-					case '\f':
-						mem[idx-1] = '\\';
-						if ( obj.IsType( _JSON_QUOTED ) )
-							mem[idx++] = '\\';
-						mem[idx++] = 'f';
-						break;
-					case '\n':
-						mem[idx-1] = '\\';
-						if ( obj.IsType( _JSON_QUOTED ) )
-							mem[idx++] = '\\';
-						mem[idx++] = 'n';
-						break;
-					case '\r':
-						mem[idx-1] = '\\';
-						if ( obj.IsType( _JSON_QUOTED ) )
-							mem[idx++] = '\\';
-						mem[idx++] = 'r';
-						break;
-					case '\t':
-						mem[idx-1] = '\\';
-						if ( obj.IsType( _JSON_QUOTED ) )
-							mem[idx++] = '\\';
-						mem[idx++] = 't';
-						break;
-					default:
-						if ( !IN_RANGE_CHAR( *(unsigned char*)c, 0x20, 0x7E ) )
-						{
-							int ret = IsValidUTF8( (unsigned char*)c, i + 1 );
-							if ( ret != 0 )
-							{
-								memcpy( mem + idx, c + 1, ret - 1 );
-								idx += ret - 1;
-								i -= ret - 1;
-								c += ret - 1;
-							}
-							else
-							{
-								mem[idx-1] = '\\';
-
-								if ( !obj.IsType( _JSON_QUOTED ) )
-								{
-									mem[idx++] = 'u';
-									idx += printhex< true, false >( mem + idx, size, (uint16_t)*(unsigned char*)c );
-								}
-								else
-								{
-									mem[idx++] = '\\';
-									mem[idx++] = 'x';
-									idx += printhex< true, false >( mem + idx, size, (SQChar)*(unsigned char*)c );
-								}
-							}
-						}
-				}
-			}
-
-			if ( obj.IsType( _JSON_QUOTED ) )
-			{
-				mem[idx++] = '\\';
-				mem[idx++] = '\"';
-			}
-
-			mem[idx++] = '\"';
-			break;
-		}
-#ifdef SQUNICODE
-		case JSON_WSTRING:
-		{
-			mem[idx++] = '\"';
-
-			if ( !obj.IsType( _JSON_QUOTED ) )
-			{
-				idx += SQUnicodeToUTF8< kUTFEscapeJSON >( mem + idx, size, obj._wstring.ptr, obj._wstring.len );
-			}
-			else
-			{
-				idx += SQUnicodeToUTF8< kUTFEscapeQuoted >( mem + idx, size, obj._wstring.ptr, obj._wstring.len );
-			}
-
-			mem[idx++] = '\"';
-			break;
-		}
-#endif
-		case JSON_INTEGER:
-		{
-			if ( !obj.IsType( _JSON_QUOTED ) )
-			{
-				idx += printint( mem + idx, size, obj._integer );
-			}
-			else
-			{
-				mem[idx++] = '\"';
-				idx += printint( mem + idx, size, obj._integer );
-				mem[idx++] = '\"';
-			}
-
-			break;
-		}
-		case JSON_FLOAT:
-		{
-			idx += sprintf( mem + idx, "%f", obj._float );
-			break;
-		}
-		case JSON_BOOL:
-		{
-			if ( obj._integer )
-			{
-				memcpy( mem + idx, "true", STRLEN("true") );
-				idx += STRLEN("true");
-			}
-			else
-			{
-				memcpy( mem + idx, "false", STRLEN("false") );
-				idx += STRLEN("false");
-			}
-			break;
-		}
-		case JSON_NULL:
-		{
-			memcpy( mem + idx, "null", STRLEN("null") );
-			idx += STRLEN("null");
-			break;
-		}
-		case JSON_TABLE:
-		{
-			mem[idx++] = '{';
-			if ( obj._table->size() )
-			{
-				for ( int i = 0; i < obj._table->size(); i++ )
-				{
-					const json_field_t *kv = obj._table->Get(i);
-					mem[idx++] = '\"';
-					memcpy( mem + idx, kv->key.ptr, kv->key.len );
-					idx += kv->key.len;
-					mem[idx++] = '\"';
-					mem[idx++] = ':';
-					idx = JSONStringify( kv->val, mem, size, idx );
-					mem[idx++] = ',';
-				}
-				idx--; // trailing comma
-			}
-			mem[idx++] = '}';
-			break;
-		}
-		case JSON_ARRAY:
-		{
-			mem[idx++] = '[';
-			if ( obj._array->size() )
-			{
-				for ( int i = 0; i < obj._array->size(); i++ )
-				{
-					idx = JSONStringify( *obj._array->Get(i), mem, size, idx );
-					mem[idx++] = ',';
-				}
-				idx--; // trailing comma
-			}
-			mem[idx++] = ']';
-			break;
-		}
-		default: UNREACHABLE();
+		PutChar( m_pBuffer, ']' );
 	}
-	Assert( idx < size );
-	return idx;
-}
 
-inline int GetJSONStringSize( json_table_t *obj )
-{
-	json_value_t v;
-	v.type = JSON_TABLE;
-	v._table = obj;
-	return GetJSONStringSize( v );
-}
+	wjson_array_t( const wjson_t &src ) : wjson_t(src)
+	{
+	}
 
-inline int JSONStringify( json_table_t *obj, char *mem, int size, int idx )
-{
-	json_value_t v;
-	v.type = JSON_TABLE;
-	v._table = obj;
-	return JSONStringify( v, mem, size, idx );
-}
+	wjson_array_t( const wjson_array_t &src );
+
+	int size()
+	{
+		return m_nElementCount;
+	}
+
+	wjson_t AppendTable()
+	{
+		if ( m_nElementCount++ )
+			PutChar( m_pBuffer, ',' );
+
+		PutChar( m_pBuffer, '{' );
+		return { m_pBuffer };
+	}
+
+	void Append( int val )
+	{
+		if ( m_nElementCount++ )
+			PutChar( m_pBuffer, ',' );
+
+		PutInt( m_pBuffer, val );
+	}
+
+	void Append( const string_t &val )
+	{
+		if ( m_nElementCount++ )
+			PutChar( m_pBuffer, ',' );
+
+		PutChar( m_pBuffer, '\"' );
+		PutStrL( m_pBuffer, val );
+		PutChar( m_pBuffer, '\"' );
+	}
+};
 
 class JSONParser
 {
 private:
 	char *m_cur;
 	char *m_end;
-	char m_error[48];
+	char *m_start;
+	CScratch< JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
+	char *m_error;
 
 	enum
 	{
@@ -1001,56 +693,66 @@ private:
 	};
 
 public:
-	JSONParser( char *ptr, int len, json_table_t *pTable )
+	JSONParser( CScratch< JSON_SCRATCH_CHUNK_SIZE > *allocator, char *ptr, int len, json_table_t *pTable ) :
+		m_cur( ptr ),
+		m_end( ptr + len + 1 ),
+		m_start( ptr ),
+		m_Allocator( allocator ),
+		m_error( NULL )
 	{
-		m_error[0] = 0;
-
-		m_cur = ptr;
-		m_end = ptr + len + 1;
-
 		string_t token;
-		int type = NextToken( token );
+		char type = NextToken( token );
 
 		if ( type == '{' )
 		{
+			pTable->Init( m_start, m_Allocator );
 			ParseTable( pTable, token );
 		}
 		else
 		{
-			SetError( "invalid token, expected '%c'", '{' );
+			SetError( "expected '%c', got '0x%02x' @ %i", '{', Char(type), Index() );
 		}
 	}
 
 	const char *GetError() const
 	{
-		return m_error[0] ? m_error : NULL;
+		return m_error;
 	}
 
 private:
+	int Index()
+	{
+		return m_cur - m_start;
+	}
+
+	unsigned char Char( char token )
+	{
+		if ( token != Token_Error )
+			return (unsigned char)token;
+
+		return *(unsigned char*)m_cur;
+	}
+
 	void SetError( const char *fmt, ... )
 	{
-		if ( m_error[0] )
+		if ( m_error )
 			return;
+
+		const int size = 48;
+		m_error = m_Allocator->Alloc( size );
 
 		va_list va;
 		va_start( va, fmt );
-		int len = vsnprintf( m_error, sizeof(m_error), fmt, va );
+		int len = vsnprintf( m_error, size, fmt, va );
 		va_end( va );
 
-		if ( len < 0 || len > (int)sizeof(m_error)-1 )
-			len = (int)sizeof(m_error)-1;
+		if ( len < 0 || len > size-1 )
+			len = size-1;
 
-		if ( (int)sizeof(m_error) - len > 4 )
-		{
-			// negative offset
-			m_error[len++] = '@';
-			m_error[len++] = '-';
-			len += printint( m_error + len, sizeof(m_error) - len, m_end - m_cur - 1 );
-			m_error[len] = 0;
-		}
+		m_error[len] = 0;
 	}
 
-	int NextToken( string_t &token )
+	char NextToken( string_t &token )
 	{
 		while ( m_cur < m_end )
 		{
@@ -1077,7 +779,7 @@ private:
 					if ( m_cur + 4 >= m_end ||
 							m_cur[1] != 'r' || m_cur[2] != 'u' || m_cur[3] != 'e' )
 					{
-						SetError( "invalid token, expected %s", "\"true\"" );
+						SetError( "expected %s @ %i", "\"true\"", Index() );
 						return Token_Error;
 					}
 
@@ -1088,7 +790,7 @@ private:
 					if ( m_cur + 5 >= m_end ||
 							m_cur[1] != 'a' || m_cur[2] != 'l' || m_cur[3] != 's' || m_cur[4] != 'e' )
 					{
-						SetError( "invalid token, expected %s", "\"false\"" );
+						SetError( "expected %s @ %i", "\"false\"", Index() );
 						return Token_Error;
 					}
 
@@ -1099,7 +801,7 @@ private:
 					if ( m_cur + 4 >= m_end ||
 							m_cur[1] != 'u' || m_cur[2] != 'l' || m_cur[3] != 'l' )
 					{
-						SetError( "invalid token, expected %s", "\"null\"" );
+						SetError( "expected %s @ %i", "\"null\"", Index() );
 						return Token_Error;
 					}
 
@@ -1107,15 +809,6 @@ private:
 					return Token_Null;
 
 				default:
-					if ( IN_RANGE_CHAR( *(unsigned char*)m_cur, 0x20, 0x7E ) )
-					{
-						SetError( "invalid token '%c'", *m_cur );
-					}
-					else
-					{
-						SetError( "invalid token '0x%02x'", *(unsigned char*)m_cur );
-					}
-
 					return Token_Error;
 			}
 		}
@@ -1123,7 +816,7 @@ private:
 		return Token_Error;
 	}
 
-	int ParseString( string_t &token )
+	char ParseString( string_t &token )
 	{
 		char *pStart = ++m_cur;
 		bool bEscape = false;
@@ -1132,7 +825,7 @@ private:
 		{
 			if ( m_cur >= m_end )
 			{
-				SetError( "unfinished string" );
+				SetError( "unfinished string @ %i", Index() );
 				return Token_Error;
 			}
 
@@ -1151,13 +844,14 @@ private:
 				continue;
 			}
 
-			if ( m_cur + 1 >= m_end )
+			m_cur++;
+
+			if ( m_cur >= m_end )
 			{
-				SetError( "unfinished string" );
+				SetError( "unfinished string @ %i", Index() );
 				return Token_Error;
 			}
 
-			m_cur++;
 			bEscape = true;
 
 			// Defer unescape until the end of the string is found
@@ -1174,7 +868,7 @@ private:
 							!_isxdigit( m_cur[1] ) || !_isxdigit( m_cur[2] ) ||
 							!_isxdigit( m_cur[3] ) || !_isxdigit( m_cur[4] ) )
 					{
-						SetError( "invalid hex escape" );
+						SetError( "invalid hex escape @ %i", Index() );
 						return Token_Error;
 					}
 
@@ -1182,7 +876,7 @@ private:
 					break;
 
 				default:
-					SetError( "invalid escape char '0x%02x'", *(unsigned char*)m_cur );
+					SetError( "invalid escape char '0x%02x' @ %i", *(unsigned char*)m_cur, Index() );
 					return Token_Error;
 			}
 		}
@@ -1222,7 +916,7 @@ shift_one:
 					case 'u':
 					{
 						unsigned int val;
-						atox( { cur + 2, 4 }, &val );
+						Verify( atox( { cur + 2, 4 }, &val ) );
 
 						if ( val <= 0xFF )
 						{
@@ -1248,7 +942,7 @@ shift_one:
 										_isxdigit( cur[10] ) && _isxdigit( cur[11] ) )
 								{
 									unsigned int low;
-									atox( { cur + 8, 4 }, &low );
+									Verify( atox( { cur + 8, 4 }, &low ) );
 
 									if ( UTF_SURROGATE_TRAIL( low ) )
 									{
@@ -1281,10 +975,10 @@ shift_one:
 		return Token_String;
 	}
 
-	int ParseNumber( string_t &token )
+	char ParseNumber( string_t &token )
 	{
 		const char *pStart = m_cur;
-		int type;
+		char type;
 
 		if ( *m_cur == '-' )
 		{
@@ -1311,7 +1005,7 @@ shift_one:
 		}
 		else
 		{
-			SetError( "unexpected char '0x%02x' in number", *(unsigned char*)m_cur );
+			SetError( "unexpected char '0x%02x' in number @ %i", *(unsigned char*)m_cur, Index() );
 			return Token_Error;
 		}
 
@@ -1352,27 +1046,23 @@ shift_one:
 		token.Assign( pStart, m_cur - pStart );
 		return type;
 
-	err_eof:
+err_eof:
 		SetError( "unexpected eof" );
 		return Token_Error;
 	}
 
-	int ParseTable( json_table_t *pTable, string_t &token )
+	char ParseTable( json_table_t *pTable, string_t &token )
 	{
-		if ( *m_cur == '}' )
-		{
-			m_cur++;
+		char type = NextToken( token );
+
+		if ( type == '}' )
 			return Token_Table;
-		}
 
-		int type;
-		do
+		for (;;)
 		{
-			type = NextToken( token );
-
 			if ( type != Token_String )
 			{
-				SetError( "invalid token, expected %s", "string" );
+				SetError( "expected %s, got '0x%02x' @ %i", "string", Char(type), Index() );
 				return Token_Error;
 			}
 
@@ -1380,95 +1070,118 @@ shift_one:
 
 			if ( type != ':' )
 			{
-				SetError( "invalid token, expected '%c'", ':' );
+				SetError( "expected '%c', got '0x%02x' @ %i", ':', Char(type), Index() );
 				return Token_Error;
 			}
 
-			Assert( !pTable->Get( token ) );
-
 			json_field_t *kv = pTable->NewElement();
-			kv->key = token;
+
+			Assert( token.ptr - m_start < (ostr_t::index_t)-1 );
+			kv->key.ofs = token.ptr - m_start;
+			kv->key.len = (ostr_t::index_t)token.len;
 
 			type = NextToken( token );
 			type = ParseValue( type, token, &kv->val );
 
 			if ( type == Token_Error )
-				return Token_Error;
-
-			type = NextToken( token );
-
-			if ( type != ',' && type != '}' )
 			{
-				SetError( "invalid token, expected '%c'", '}' );
+				SetError( "invalid token '0x%02x' @ %i", Char(type), Index() );
 				return Token_Error;
 			}
-		} while ( type != '}' );
 
-		return Token_Table;
-	}
-
-	int ParseArray( json_array_t *pArray, string_t &token )
-	{
-		if ( *m_cur == ']' )
-		{
-			m_cur++;
-			return Token_Array;
-		}
-
-		int type;
-		do
-		{
 			type = NextToken( token );
 
-			if ( type == Token_Error )
+			if ( type == ',' )
+			{
+				type = NextToken( token );
+			}
+			else if ( type == '}' )
+			{
+				return Token_Table;
+			}
+			else
+			{
+				SetError( "expected '%c', got '0x%02x' @ %i", '}', Char(type), Index() );
 				return Token_Error;
+			}
+		}
+	}
+
+	char ParseArray( json_array_t *pArray, string_t &token )
+	{
+		char type = NextToken( token );
+
+		if ( type == ']' )
+			return Token_Array;
+
+		for (;;)
+		{
+			if ( type == Token_Error )
+			{
+				SetError( "expected '%c', got '0x%02x' @ %i", ']', Char(type), Index() );
+				return Token_Error;
+			}
 
 			json_value_t *val = pArray->NewElement();
 			type = ParseValue( type, token, val );
 
 			if ( type == Token_Error )
+			{
+				SetError( "invalid token '0x%02x' @ %i", Char(type), Index() );
 				return Token_Error;
+			}
 
 			type = NextToken( token );
 
-			if ( type != ',' && type != ']' )
+			if ( type == ',' )
 			{
-				SetError( "invalid token, expected '%c'", ']' );
+				type = NextToken( token );
+			}
+			else if ( type == ']' )
+			{
+				return Token_Array;
+			}
+			else
+			{
+				SetError( "expected '%c', got '0x%02x' @ %i", ']', Char(type), Index() );
 				return Token_Error;
 			}
-		} while ( type != ']' );
-
-		return Token_Array;
+		}
 	}
 
-	int ParseValue( int type, string_t &token, json_value_t *value )
+	char ParseValue( char type, string_t &token, json_value_t *value )
 	{
 		switch ( type )
 		{
 			case Token_Integer:
+				if ( token.len > FMT_INT_LEN )
+				{
+					SetError( "invalid integer literal @ %i", Index() );
+					return Token_Error;
+				}
+
 				value->type = JSON_INTEGER;
-				atoi( token, &value->_integer );
+				Verify( atoi( token, &value->_integer ) );
 				return type;
 			case Token_Float:
-			{
-				char cEnd = token.ptr[token.len];
-				token.ptr[token.len] = 0;
 				value->type = JSON_FLOAT;
-				value->_float = (SQFloat)strtod( token.ptr, NULL );
-				token.ptr[token.len] = cEnd;
+				// floats are unused, ignore value
 				return type;
-			}
 			case Token_String:
 				value->type = JSON_STRING;
-				value->_string = token;
+				Assert( token.ptr - m_start < (ostr_t::index_t)-1 );
+				value->_string.ofs = token.ptr - m_start;
+				value->_string.len = (ostr_t::index_t)token.len;
 				return type;
 			case '{':
-				value->type = JSON_TABLE | _JSON_ALLOCATED;
-				value->_table = CreateTable(0);
+				value->type = JSON_TABLE;
+				value->_table = (json_table_t*)m_Allocator->Alloc( sizeof(json_table_t) );
+				value->_table->Init( m_start, m_Allocator );
 				return ParseTable( value->_table, token );
 			case '[':
-				value->type = JSON_ARRAY | _JSON_ALLOCATED;
-				value->_array = CreateArray(0);
+				value->type = JSON_ARRAY;
+				value->_array = (json_array_t*)m_Allocator->Alloc( sizeof(json_array_t) );
+				value->_array->Init( m_start, m_Allocator );
 				return ParseArray( value->_array, token );
 			case Token_False:
 			case Token_True:
@@ -1479,8 +1192,7 @@ shift_one:
 				value->type = JSON_NULL;
 				return type;
 			default:
-				SetError( "unrecognised token" );
-				return Token_Error;
+				return type;
 		}
 	}
 };

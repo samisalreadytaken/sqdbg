@@ -10,35 +10,17 @@
 	#ifdef _WIN32
 		#include <crtdbg.h>
 
-		extern "C" WINBASEAPI BOOL WINAPI IsDebuggerPresent( VOID );
+		bool __IsDebuggerPresent();
+		const char *GetModuleBaseName();
 
-		static inline const char *GetModuleBaseName()
-		{
-			static char module[MAX_PATH];
-			DWORD len = GetModuleFileNameA( NULL, module, sizeof(module) );
-
-			if ( len != 0 )
-			{
-				for ( char *pBase = module + len; pBase-- > module; )
-				{
-					if ( *pBase == '\\' )
-						return pBase + 1;
-				}
-
-				return module;
-			}
-
-			return "";
-		}
-
-		#define DebuggerBreak() do { if ( IsDebuggerPresent() ) __debugbreak(); } while(0)
+		#define DebuggerBreak() do { if ( __IsDebuggerPresent() ) __debugbreak(); } while(0)
 
 		#define Assert( x ) \
 			do { \
 				__CAT( L, __LINE__ ): \
 				if ( !(x) && (1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, GetModuleBaseName(), #x)) ) \
 				{ \
-					if ( !IsDebuggerPresent() ) \
+					if ( !__IsDebuggerPresent() ) \
 						goto __CAT( L, __LINE__ ); \
 					__debugbreak(); \
 				} \
@@ -49,7 +31,7 @@
 				__CAT( L, __LINE__ ): \
 				if ( !(x) && (1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, GetModuleBaseName(), msg)) ) \
 				{ \
-					if ( !IsDebuggerPresent() ) \
+					if ( !__IsDebuggerPresent() ) \
 						goto __CAT( L, __LINE__ ); \
 					__debugbreak(); \
 				} \
@@ -60,7 +42,7 @@
 				__CAT( L, __LINE__ ): \
 				if ( !(x) && (1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, GetModuleBaseName(), msg, a1)) ) \
 				{ \
-					if ( !IsDebuggerPresent() ) \
+					if ( !__IsDebuggerPresent() ) \
 						goto __CAT( L, __LINE__ ); \
 					__debugbreak(); \
 				} \
@@ -71,7 +53,7 @@
 				__CAT( L, __LINE__ ): \
 				if ( !(x) && (1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, GetModuleBaseName(), msg, a1, a2)) ) \
 				{ \
-					if ( !IsDebuggerPresent() ) \
+					if ( !__IsDebuggerPresent() ) \
 						goto __CAT( L, __LINE__ ); \
 					__debugbreak(); \
 				} \

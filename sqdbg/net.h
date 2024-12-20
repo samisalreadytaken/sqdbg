@@ -11,6 +11,30 @@
 	#include <WS2tcpip.h>
 	#ifdef _DEBUG
 		#include <debugapi.h>
+
+		inline bool __IsDebuggerPresent()
+		{
+			return IsDebuggerPresent();
+		}
+
+		inline const char *GetModuleBaseName()
+		{
+			static char module[MAX_PATH];
+			int len = GetModuleFileNameA( NULL, module, sizeof(module) );
+
+			if ( len != 0 )
+			{
+				for ( char *pBase = module + len; pBase-- > module; )
+				{
+					if ( *pBase == '\\' )
+						return pBase + 1;
+				}
+
+				return module;
+			}
+
+			return "";
+		}
 	#endif
 
 	#pragma comment(lib, "Ws2_32.lib")
@@ -46,8 +70,6 @@
 	#define SD_BOTH SHUT_RDWR
 #endif
 
-#include "debug.h"
-
 #ifdef _DEBUG
 	class CEntryCounter
 	{
@@ -68,104 +90,182 @@ void *sqdbg_malloc( unsigned int size );
 void *sqdbg_realloc( void *p, unsigned int oldsize, unsigned int size );
 void sqdbg_free( void *p, unsigned int size );
 
+#ifndef SQDBG_NET_BUF_SIZE
 #define SQDBG_NET_BUF_SIZE ( 16 * 1024 )
+#endif
 
 class CMessagePool
 {
-private:
-	typedef int elem_t;
+public:
+	typedef int index_t;
 
+#pragma pack(push, 4)
 	struct message_t
 	{
+		index_t next;
+		index_t prev;
+		unsigned short len;
+		char ptr[1];
+	};
+#pragma pack(pop)
+
+	struct chunk_t
+	{
 		char *ptr;
-		int len;
-		elem_t next;
-		elem_t prev;
+		int count;
 	};
 
-	static const elem_t INVALID_ELEM = -1;
+	static const index_t INVALID_INDEX = 0x80000000;
 
-	message_t *Get( elem_t i )
+	// Message queue is going to be less than 16 unless
+	// there is many variable evaluations at once or network lag
+	static const int MEM_CACHE_CHUNKS_ALIGN = 16;
+
+	// Most messages are going to be less than 256 bytes,
+	// only exceeding it on long file paths and long evaluate strings
+	static const int MEM_CACHE_CHUNKSIZE = 256;
+
+	message_t *Get( index_t index )
 	{
-		Assert( i >= 0 && i < m_MemCount );
-		return &m_Memory[i];
+		Assert( index != INVALID_INDEX );
+
+		int msgIdx = index & 0x0000ffff;
+		int chunkIdx = index >> 16;
+
+		Assert( m_Memory );
+		Assert( chunkIdx < m_MemChunkCount );
+
+		chunk_t *chunk = &m_Memory[ chunkIdx ];
+		Assert( msgIdx < chunk->count );
+
+		return (message_t*)&chunk->ptr[ msgIdx * MEM_CACHE_CHUNKSIZE ];
 	}
 
-	message_t *m_Memory;
-
-	int m_Head;
-	int m_Tail;
-
+	chunk_t *m_Memory;
+	int m_MemChunkCount;
 	int m_ElemCount;
-	int m_MemCount;
 
-	elem_t NewMessage( char *pcsMsg, int nLength )
+	index_t m_Head;
+	index_t m_Tail;
+
+	index_t NewMessage( char *pcsMsg, int nLength )
 	{
 		if ( !m_Memory )
 		{
-			m_Memory = (message_t*)sqdbg_malloc( m_MemCount * sizeof(message_t) );
-			memset( m_Memory, 0, m_MemCount * sizeof(message_t) );
-		}
-		else if ( m_ElemCount >= m_MemCount )
-		{
-			int oldcount = m_MemCount;
-			m_MemCount <<= 1;
-			m_Memory = (message_t*)sqdbg_realloc( m_Memory,
-					oldcount * sizeof(message_t),
-					m_MemCount * sizeof(message_t) );
-			memset( (char*)m_Memory + oldcount * sizeof(message_t),
-					0,
-					(m_MemCount - oldcount) * sizeof(message_t) );
+			m_Memory = (chunk_t*)sqdbg_malloc( m_MemChunkCount * sizeof(chunk_t) );
+			AssertOOM( m_Memory, m_MemChunkCount * sizeof(chunk_t) );
+			memset( (char*)m_Memory, 0, m_MemChunkCount * sizeof(chunk_t) );
+
+			chunk_t *chunk = &m_Memory[0];
+			chunk->count = MEM_CACHE_CHUNKS_ALIGN;
+			chunk->ptr = (char*)sqdbg_malloc( chunk->count * MEM_CACHE_CHUNKSIZE );
+			AssertOOM( chunk->ptr, chunk->count * MEM_CACHE_CHUNKSIZE );
+			memset( chunk->ptr, 0, chunk->count * MEM_CACHE_CHUNKSIZE );
 		}
 
-		m_ElemCount++;
-
-		int n = 0;
-		message_t *pMsg;
+		int requiredChunks = ( sizeof(message_t) + nLength - 1 ) / MEM_CACHE_CHUNKSIZE + 1;
+		int matchedChunks = 0;
+		int msgIdx = 0;
+		int chunkIdx = 0;
 
 		for (;;)
 		{
-			pMsg = &m_Memory[n];
+			chunk_t *chunk = &m_Memory[ chunkIdx ];
+			Assert( chunk->count && chunk->ptr );
 
-			if ( pMsg->ptr == NULL )
-				break;
+			message_t *msg = (message_t*)&chunk->ptr[ msgIdx * MEM_CACHE_CHUNKSIZE ];
 
-			if ( ++n == m_MemCount )
-				break;
+			if ( msg->len == 0 )
+			{
+				if ( ++matchedChunks == requiredChunks )
+				{
+					msgIdx = msgIdx - matchedChunks + 1;
+					msg = (message_t*)&chunk->ptr[ msgIdx * MEM_CACHE_CHUNKSIZE ];
+
+					Assert( nLength >= 0 );
+					Assert( nLength < ( 1 << ( sizeof(message_t::len) * 8 ) ) );
+
+					msg->next = msg->prev = INVALID_INDEX;
+					msg->len = (unsigned short)nLength;
+					memcpy( msg->ptr, pcsMsg, nLength );
+
+					return ( chunkIdx << 16 ) | msgIdx;
+				}
+			}
+			else
+			{
+				matchedChunks = 0;
+			}
+
+			msgIdx += ( sizeof(message_t) + msg->len - 1 ) / MEM_CACHE_CHUNKSIZE + 1;
+
+			Assert( msgIdx < 0x0000ffff );
+
+			if ( msgIdx < chunk->count )
+				continue;
+
+			msgIdx = 0;
+			matchedChunks = 0;
+
+			if ( ++chunkIdx >= m_MemChunkCount )
+			{
+				int oldcount = m_MemChunkCount;
+				m_MemChunkCount += 4;
+				m_Memory = (chunk_t*)sqdbg_realloc( m_Memory,
+						oldcount * sizeof(chunk_t),
+						m_MemChunkCount * sizeof(chunk_t) );
+				AssertOOM( m_Memory, m_MemChunkCount * sizeof(chunk_t) );
+				memset( (char*)m_Memory + oldcount * sizeof(chunk_t),
+						0,
+						(m_MemChunkCount - oldcount) * sizeof(chunk_t) );
+			}
+
+			chunk = &m_Memory[ chunkIdx ];
+
+			if ( chunk->count == 0 )
+			{
+				Assert( chunk->ptr == NULL );
+
+				chunk->count = ( requiredChunks + ( MEM_CACHE_CHUNKS_ALIGN - 1 ) ) & ~( MEM_CACHE_CHUNKS_ALIGN - 1 );
+				chunk->ptr = (char*)sqdbg_malloc( chunk->count * MEM_CACHE_CHUNKSIZE );
+				AssertOOM( chunk->ptr, chunk->count * MEM_CACHE_CHUNKSIZE );
+				memset( chunk->ptr, 0, chunk->count * MEM_CACHE_CHUNKSIZE );
+			}
+
+			Assert( chunkIdx < 0x00007fff );
 		}
-
-		Assert( n >= 0 && n < m_MemCount );
-		Assert( pMsg->ptr == NULL );
-
-		pMsg->next = pMsg->prev = INVALID_ELEM;
-		pMsg->ptr = (char*)sqdbg_malloc( nLength );
-		memcpy( pMsg->ptr, pcsMsg, nLength );
-		pMsg->len = nLength;
-
-		return n;
 	}
 
 	void DeleteMessage( message_t *pMsg )
 	{
-		if ( pMsg->ptr == NULL )
+		if ( pMsg->len == 0 )
 			return;
 
-		Assert( m_ElemCount );
+		Assert( pMsg->len > 0 );
+		Assert( m_ElemCount > 0 );
 		m_ElemCount--;
 
-		sqdbg_free( pMsg->ptr, pMsg->len );
-		pMsg->ptr = 0;
-		pMsg->len = 0;
-		pMsg->next = pMsg->prev = INVALID_ELEM;
+		int msgIdx = ( ( sizeof(message_t) + pMsg->len +
+					( MEM_CACHE_CHUNKSIZE - 1 ) ) & ~( MEM_CACHE_CHUNKSIZE - 1 ) ) / MEM_CACHE_CHUNKSIZE;
+
+		do
+		{
+			pMsg->next = pMsg->prev = INVALID_INDEX;
+			pMsg->len = 0;
+			pMsg->ptr[0] = 0;
+
+			pMsg = (message_t*)( (char*)pMsg + MEM_CACHE_CHUNKSIZE );
+		}
+		while ( --msgIdx > 0 );
 	}
 
 public:
 	CMessagePool() :
 		m_Memory( NULL ),
-		m_Head( INVALID_ELEM ),
-		m_Tail( INVALID_ELEM ),
+		m_MemChunkCount( 4 ),
 		m_ElemCount( 0 ),
-		m_MemCount( 16 )
+		m_Head( INVALID_INDEX ),
+		m_Tail( INVALID_INDEX )
 	{
 	}
 
@@ -173,24 +273,76 @@ public:
 	{
 		if ( m_Memory )
 		{
-			for ( int i = 0; i < m_MemCount; i++ )
+			for ( int chunkIdx = 0; chunkIdx < m_MemChunkCount; chunkIdx++ )
 			{
-				message_t *pMsg = &m_Memory[i];
-				DeleteMessage( pMsg );
+				chunk_t *chunk = &m_Memory[ chunkIdx ];
+
+				for ( int msgIdx = 0; msgIdx < chunk->count; )
+				{
+					message_t *msg = (message_t*)&chunk->ptr[ msgIdx * MEM_CACHE_CHUNKSIZE ];
+					Assert( msg->len == 0 && msg->ptr[0] == 0 );
+					msgIdx += ( sizeof(message_t) + msg->len - 1 ) / MEM_CACHE_CHUNKSIZE + 1;
+					DeleteMessage( msg );
+				}
+
+				sqdbg_free( chunk->ptr, chunk->count * MEM_CACHE_CHUNKSIZE );
 			}
 
-			sqdbg_free( m_Memory, m_MemCount * sizeof(message_t) );
+			sqdbg_free( m_Memory, m_MemChunkCount * sizeof(chunk_t) );
+		}
+
+		Assert( m_ElemCount == 0 );
+	}
+
+	void Shrink()
+	{
+		Assert( m_ElemCount == 0 );
+
+		if ( !m_Memory )
+			return;
+
+		for ( int chunkIdx = 1; chunkIdx < m_MemChunkCount; chunkIdx++ )
+		{
+			chunk_t *chunk = &m_Memory[ chunkIdx ];
+
+			if ( chunk->count )
+			{
+#ifdef _DEBUG
+				for ( int msgIdx = 0; msgIdx < chunk->count; )
+				{
+					message_t *msg = (message_t*)&chunk->ptr[ msgIdx * MEM_CACHE_CHUNKSIZE ];
+					Assert( msg->len == 0 && msg->ptr[0] == 0 );
+					msgIdx += ( sizeof(message_t) + msg->len - 1 ) / MEM_CACHE_CHUNKSIZE + 1;
+				}
+#endif
+				sqdbg_free( chunk->ptr, chunk->count * MEM_CACHE_CHUNKSIZE );
+
+				chunk->count = 0;
+				chunk->ptr = NULL;
+			}
+		}
+
+		if ( m_MemChunkCount > 4 )
+		{
+			int oldcount = m_MemChunkCount;
+			m_MemChunkCount = 4;
+			m_Memory = (chunk_t*)sqdbg_realloc( m_Memory,
+					oldcount * sizeof(chunk_t),
+					m_MemChunkCount * sizeof(chunk_t) );
+			AssertOOM( m_Memory, m_MemChunkCount * sizeof(chunk_t) );
 		}
 	}
 
-	void Add( char *pMsg, int nLength )
+	void Add( char *pcsMsg, int nLength )
 	{
-		elem_t newMsg = NewMessage( pMsg, nLength );
+		index_t newMsg = NewMessage( pcsMsg, nLength );
+
+		m_ElemCount++;
 
 		// Add to tail
-		if ( m_Tail == INVALID_ELEM )
+		if ( m_Tail == INVALID_INDEX )
 		{
-			Assert( m_Head == INVALID_ELEM );
+			Assert( m_Head == INVALID_INDEX );
 			m_Head = m_Tail = newMsg;
 		}
 		else
@@ -206,82 +358,86 @@ public:
 	{
 		TRACK_ENTRIES();
 
-		elem_t msg = m_Head;
-		while ( msg != INVALID_ELEM )
+		index_t msg = m_Head;
+
+		while ( msg != INVALID_INDEX )
 		{
 			message_t *pMsg = Get(msg);
 
-			Assert( pMsg->ptr || ( pMsg->next == INVALID_ELEM && pMsg->prev == INVALID_ELEM ) );
+			Assert( pMsg->len || ( pMsg->next == INVALID_INDEX && pMsg->prev == INVALID_INDEX ) );
 
-			if ( pMsg->ptr == NULL )
+			if ( pMsg->len == 0 )
 				break;
 
 			// Advance before execution
-			elem_t next = pMsg->next;
-			elem_t prev = pMsg->prev;
+			index_t next = pMsg->next;
+			index_t prev = pMsg->prev;
 
-			pMsg->next = INVALID_ELEM;
-			pMsg->prev = INVALID_ELEM;
+			pMsg->next = INVALID_INDEX;
+			pMsg->prev = INVALID_INDEX;
 
-			if ( prev != INVALID_ELEM )
+			if ( prev != INVALID_INDEX )
 				Get(prev)->next = next;
 
-			if ( next != INVALID_ELEM )
+			if ( next != INVALID_INDEX )
 				Get(next)->prev = prev;
 
 			if ( msg == m_Head )
 			{
 				// prev could be non-null on re-entry
-				//Assert( prev == INVALID_ELEM );
+				//Assert( prev == INVALID_INDEX );
 				m_Head = next;
 			}
 
 			if ( msg == m_Tail )
 			{
-				Assert( next == INVALID_ELEM && prev == INVALID_ELEM );
-				m_Tail = INVALID_ELEM;
+				Assert( next == INVALID_INDEX && prev == INVALID_INDEX );
+				m_Tail = INVALID_INDEX;
 			}
 
 			(ctx->*callback)( pMsg->ptr, pMsg->len );
 
-			DeleteMessage( Get(msg) );
+			Assert( Get(msg) == pMsg );
+
+			DeleteMessage( pMsg );
 			msg = next;
 		}
 	}
 
 	void Clear()
 	{
-		elem_t msg = m_Head;
-		while ( msg != INVALID_ELEM )
+		index_t msg = m_Head;
+
+		while ( msg != INVALID_INDEX )
 		{
 			message_t *pMsg = Get(msg);
 
-			elem_t next = pMsg->next;
-			elem_t prev = pMsg->prev;
+			index_t next = pMsg->next;
+			index_t prev = pMsg->prev;
 
-			if ( prev != INVALID_ELEM )
+			if ( prev != INVALID_INDEX )
 				Get(prev)->next = next;
 
-			if ( next != INVALID_ELEM )
+			if ( next != INVALID_INDEX )
 				Get(next)->prev = prev;
 
 			if ( msg == m_Head )
 			{
-				Assert( prev == INVALID_ELEM );
+				Assert( prev == INVALID_INDEX );
 				m_Head = next;
 			}
 
 			if ( msg == m_Tail )
 			{
-				Assert( next == INVALID_ELEM && prev == INVALID_ELEM );
-				m_Tail = INVALID_ELEM;
+				Assert( next == INVALID_INDEX && prev == INVALID_INDEX );
+				m_Tail = INVALID_INDEX;
 			}
 
 			DeleteMessage( pMsg );
 			msg = next;
 		}
 
-		Assert( m_Head == INVALID_ELEM && m_Tail == INVALID_ELEM );
+		Assert( m_Head == INVALID_INDEX && m_Tail == INVALID_INDEX );
 	}
 };
 
@@ -368,6 +524,7 @@ public:
 #endif
 
 		m_ServerSocket = socket( AF_INET, SOCK_STREAM, 0 );
+
 		if ( m_ServerSocket == INVALID_SOCKET )
 		{
 			int err = errno;
@@ -393,6 +550,7 @@ public:
 		}
 
 		iMode = 1;
+
 		if ( setsockopt( m_ServerSocket, IPPROTO_TCP, TCP_NODELAY, (char*)&iMode, sizeof(iMode) ) == SOCKET_ERROR )
 		{
 			int err = errno;
@@ -405,6 +563,7 @@ public:
 		linger ln;
 		ln.l_onoff = 0;
 		ln.l_linger = 0;
+
 		if ( setsockopt( m_ServerSocket, SOL_SOCKET, SO_LINGER, (char*)&ln, sizeof(ln) ) == SOCKET_ERROR )
 		{
 			int err = errno;
@@ -462,6 +621,7 @@ public:
 		socklen_t addrlen = sizeof(addr);
 
 		m_Socket = accept( m_ServerSocket, (sockaddr*)&addr, &addrlen );
+
 		if ( m_Socket == INVALID_SOCKET )
 			return false;
 
@@ -555,6 +715,7 @@ public:
 		ioctlsocket( m_Socket, FIONREAD, &readlen );
 
 		int bufsize = m_pRecvBuf + sizeof(m_pRecvBuf) - m_pRecvBufPtr;
+
 		if ( bufsize <= 0 || (unsigned int)bufsize < readlen )
 		{
 			DisconnectClient();
@@ -622,7 +783,7 @@ public:
 				DisconnectClient();
 				m_pszLastMsgFmt = "(sqdbg) Client disconnected";
 
-				if ( nLength == 0x7fffffff )
+				if ( nLength == -1 )
 				{
 					m_pszLastMsg = "malformed message";
 				}
@@ -651,9 +812,10 @@ public:
 			// Next message
 			int shift = m_pRecvBufPtr - pMsgEnd;
 			memmove( m_pRecvBuf, pMsgEnd, shift );
-			memset( m_pRecvBuf + shift, 0, m_pRecvBufPtr - ( m_pRecvBuf + shift ) ); // helps debugging
+			memset( m_pRecvBuf + shift, 0, m_pRecvBufPtr - ( m_pRecvBuf + shift ) );
 			m_pRecvBufPtr = m_pRecvBuf + shift;
 			pMsg = m_pRecvBuf;
+			nLength = sizeof(m_pRecvBuf);
 		}
 
 		return true;
@@ -663,6 +825,11 @@ public:
 	void Execute( T *ctx )
 	{
 		m_MessagePool.Service< T, callback >( ctx );
+
+		if ( m_Socket == INVALID_SOCKET && m_MessagePool.m_ElemCount == 0 )
+		{
+			m_MessagePool.Shrink();
+		}
 	}
 
 public:
@@ -672,7 +839,7 @@ public:
 		m_pRecvBufPtr( m_pRecvBuf ),
 		m_bWSAInit( false )
 	{
-		memset( m_pRecvBuf, -1, sizeof( m_pRecvBuf ) );
+		Assert( sizeof(m_pRecvBuf) <= ( 1 << ( sizeof(CMessagePool::message_t::len) * 8 ) ) );
 	}
 };
 
