@@ -96,7 +96,7 @@ public:
 		return ret;
 	}
 
-	int size() const
+	int Size() const
 	{
 		return m_nElementCount;
 	}
@@ -268,9 +268,9 @@ public:
 
 static inline void PutStrL( CBuffer *buffer, const string_t &str )
 {
-	buffer->_base.Ensure( buffer->size() + str.len );
-	memcpy( buffer->base() + buffer->size(), str.ptr, str.len );
-	buffer->_size += str.len;
+	buffer->base.Ensure( buffer->Size() + str.len );
+	memcpy( buffer->Base() + buffer->Size(), str.ptr, str.len );
+	buffer->size += str.len;
 }
 
 static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
@@ -321,10 +321,10 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 		}
 	}
 
-	buffer->_base.Ensure( buffer->size() + len );
+	buffer->base.Ensure( buffer->Size() + len );
 
-	char *mem = buffer->base();
-	unsigned int idx = buffer->size();
+	char *mem = buffer->Base();
+	unsigned int idx = buffer->Size();
 
 	c = str.ptr;
 	i = str.len;
@@ -410,7 +410,7 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 							mem[idx++] = 'u';
 							idx += printhex< true, false >(
 									mem + idx,
-									buffer->capacity() - idx,
+									buffer->Capacity() - idx,
 									(uint16_t)*(unsigned char*)c );
 						}
 						else
@@ -419,7 +419,7 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 							mem[idx++] = 'x';
 							idx += printhex< true, false >(
 									mem + idx,
-									buffer->capacity() - idx,
+									buffer->Capacity() - idx,
 									(SQChar)*(unsigned char*)c );
 						}
 					}
@@ -435,7 +435,7 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 
 	mem[idx++] = '\"';
 
-	buffer->_size = idx;
+	buffer->size = idx;
 }
 
 #ifdef SQUNICODE
@@ -452,53 +452,53 @@ static inline void PutStr( CBuffer *buffer, const sqstring_t &str, bool quote )
 		len = 2 + UTF8Length< kUTFEscapeQuoted >( str.ptr, str.len );
 	}
 
-	buffer->_base.Ensure( buffer->size() + len );
-	buffer->base()[buffer->_size++] = '\"';
+	buffer->base.Ensure( buffer->Size() + len );
+	buffer->Base()[buffer->size++] = '\"';
 
 	if ( !quote )
 	{
 		len = SQUnicodeToUTF8< kUTFEscapeJSON >(
-				buffer->base() + buffer->size(),
-				buffer->capacity() - buffer->size(),
+				buffer->Base() + buffer->Size(),
+				buffer->Capacity() - buffer->Size(),
 				str.ptr,
 				str.len );
 	}
 	else
 	{
 		len = SQUnicodeToUTF8< kUTFEscapeQuoted >(
-				buffer->base() + buffer->size(),
-				buffer->capacity() - buffer->size(),
+				buffer->Base() + buffer->Size(),
+				buffer->Capacity() - buffer->Size(),
 				str.ptr,
 				str.len );
 	}
 
-	buffer->_size += len;
-	buffer->base()[buffer->_size++] = '\"';
+	buffer->size += len;
+	buffer->Base()[buffer->size++] = '\"';
 }
 #endif
 
 static inline void PutChar( CBuffer *buffer, char c )
 {
-	buffer->_base.Ensure( buffer->size() + 1 );
-	buffer->base()[buffer->_size++] = c;
+	buffer->base.Ensure( buffer->Size() + 1 );
+	buffer->Base()[buffer->size++] = c;
 }
 
 template < typename I >
 static inline void PutInt( CBuffer *buffer, I val, bool hex = false )
 {
 	int len;
-	buffer->_base.Ensure( buffer->size() + countdigits( val ) + 1 );
+	buffer->base.Ensure( buffer->Size() + countdigits( val ) + 1 );
 
 	if ( !hex )
 	{
-		len = printint( buffer->base() + buffer->size(), buffer->capacity() - buffer->size(), val );
+		len = printint( buffer->Base() + buffer->Size(), buffer->Capacity() - buffer->Size(), val );
 	}
 	else
 	{
-		len = printhex< false >( buffer->base() + buffer->size(), buffer->capacity() - buffer->size(), val );
+		len = printhex< false >( buffer->Base() + buffer->Size(), buffer->Capacity() - buffer->Size(), val );
 	}
 
-	buffer->_size += len;
+	buffer->size += len;
 }
 
 class wjson_table_t;
@@ -637,7 +637,7 @@ public:
 
 	wjson_array_t( const wjson_array_t &src );
 
-	int size()
+	int Size()
 	{
 		return m_nElementCount;
 	}
@@ -710,7 +710,7 @@ public:
 		}
 		else
 		{
-			SetError( "expected '%c', got '0x%02x' @ %i", '{', Char(type), Index() );
+			SetError( "expected '%c', got %s @ %i", '{', Char(type), Index() );
 		}
 	}
 
@@ -725,12 +725,30 @@ private:
 		return m_cur - m_start;
 	}
 
-	unsigned char Char( char token )
+	char *Char( char token )
 	{
-		if ( token != Token_Error )
-			return (unsigned char)token;
+		char *buf;
 
-		return *(unsigned char*)m_cur;
+		if ( token == Token_Error )
+			token = *m_cur;
+
+		if ( IN_RANGE_CHAR( token, 0x20, 0x7E ) )
+		{
+			buf = m_Allocator->Alloc(4);
+			buf[0] = '\'';
+			buf[1] = token;
+			buf[2] = '\'';
+			buf[3] = 0;
+		}
+		else
+		{
+			buf = m_Allocator->Alloc(5);
+			int i = printhex< true, true, false >( buf, 5, token );
+			Assert( i == 4 );
+			buf[i] = 0;
+		}
+
+		return buf;
 	}
 
 	void SetError( const char *fmt, ... )
@@ -776,37 +794,37 @@ private:
 					return *m_cur++;
 
 				case 't':
-					if ( m_cur + 4 >= m_end ||
-							m_cur[1] != 'r' || m_cur[2] != 'u' || m_cur[3] != 'e' )
+					if ( m_cur + 4 < m_end &&
+							m_cur[1] == 'r' && m_cur[2] == 'u' && m_cur[3] == 'e' )
 					{
-						SetError( "expected %s @ %i", "\"true\"", Index() );
-						return Token_Error;
+						m_cur += 4;
+						return Token_True;
 					}
 
-					m_cur += 4;
-					return Token_True;
+					SetError( "expected %s @ %i", "\"true\"", Index() );
+					return Token_Error;
 
 				case 'f':
-					if ( m_cur + 5 >= m_end ||
-							m_cur[1] != 'a' || m_cur[2] != 'l' || m_cur[3] != 's' || m_cur[4] != 'e' )
+					if ( m_cur + 5 < m_end &&
+							m_cur[1] == 'a' && m_cur[2] == 'l' && m_cur[3] == 's' && m_cur[4] == 'e' )
 					{
-						SetError( "expected %s @ %i", "\"false\"", Index() );
-						return Token_Error;
+						m_cur += 5;
+						return Token_False;
 					}
 
-					m_cur += 5;
-					return Token_False;
+					SetError( "expected %s @ %i", "\"false\"", Index() );
+					return Token_Error;
 
 				case 'n':
-					if ( m_cur + 4 >= m_end ||
-							m_cur[1] != 'u' || m_cur[2] != 'l' || m_cur[3] != 'l' )
+					if ( m_cur + 4 < m_end &&
+							m_cur[1] == 'u' && m_cur[2] == 'l' && m_cur[3] == 'l' )
 					{
-						SetError( "expected %s @ %i", "\"null\"", Index() );
-						return Token_Error;
+						m_cur += 4;
+						return Token_Null;
 					}
 
-					m_cur += 4;
-					return Token_Null;
+					SetError( "expected %s @ %i", "\"null\"", Index() );
+					return Token_Error;
 
 				default:
 					return Token_Error;
@@ -829,7 +847,6 @@ private:
 				return Token_Error;
 			}
 
-			// end
 			if ( *m_cur == '\"' )
 			{
 				*m_cur = 0;
@@ -876,7 +893,7 @@ private:
 					break;
 
 				default:
-					SetError( "invalid escape char '0x%02x' @ %i", *(unsigned char*)m_cur, Index() );
+					SetError( "invalid escape char 0x%02x @ %i", *(unsigned char*)m_cur, Index() );
 					return Token_Error;
 			}
 		}
@@ -895,6 +912,7 @@ private:
 				}
 
 #define _shift( bytesWritten, bytesRead ) \
+	Assert( (bytesWritten) < (bytesRead) ); \
 	memmove( cur + (bytesWritten), cur + (bytesRead), end - ( cur + (bytesRead) ) ); \
 	cur += (bytesWritten); \
 	end -= (bytesRead) - (bytesWritten);
@@ -918,7 +936,7 @@ shift_one:
 						unsigned int val;
 						Verify( atox( { cur + 2, 4 }, &val ) );
 
-						if ( val <= 0xFF )
+						if ( val <= 0x7F )
 						{
 							cur[0] = (char)val;
 
@@ -1005,7 +1023,7 @@ shift_one:
 		}
 		else
 		{
-			SetError( "unexpected char '0x%02x' in number @ %i", *(unsigned char*)m_cur, Index() );
+			SetError( "unexpected char 0x%02x in number @ %i", *(unsigned char*)m_cur, Index() );
 			return Token_Error;
 		}
 
@@ -1062,7 +1080,7 @@ err_eof:
 		{
 			if ( type != Token_String )
 			{
-				SetError( "expected %s, got '0x%02x' @ %i", "string", Char(type), Index() );
+				SetError( "expected '%c', got %s @ %i", '\"', Char(type), Index() );
 				return Token_Error;
 			}
 
@@ -1070,7 +1088,7 @@ err_eof:
 
 			if ( type != ':' )
 			{
-				SetError( "expected '%c', got '0x%02x' @ %i", ':', Char(type), Index() );
+				SetError( "expected '%c', got %s @ %i", ':', Char(type), Index() );
 				return Token_Error;
 			}
 
@@ -1085,7 +1103,7 @@ err_eof:
 
 			if ( type == Token_Error )
 			{
-				SetError( "invalid token '0x%02x' @ %i", Char(type), Index() );
+				SetError( "invalid token %s @ %i", Char(type), Index() );
 				return Token_Error;
 			}
 
@@ -1101,7 +1119,7 @@ err_eof:
 			}
 			else
 			{
-				SetError( "expected '%c', got '0x%02x' @ %i", '}', Char(type), Index() );
+				SetError( "expected '%c', got %s @ %i", '}', Char(type), Index() );
 				return Token_Error;
 			}
 		}
@@ -1118,7 +1136,7 @@ err_eof:
 		{
 			if ( type == Token_Error )
 			{
-				SetError( "expected '%c', got '0x%02x' @ %i", ']', Char(type), Index() );
+				SetError( "expected '%c', got %s @ %i", ']', Char(type), Index() );
 				return Token_Error;
 			}
 
@@ -1127,7 +1145,7 @@ err_eof:
 
 			if ( type == Token_Error )
 			{
-				SetError( "invalid token '0x%02x' @ %i", Char(type), Index() );
+				SetError( "invalid token %s @ %i", Char(type), Index() );
 				return Token_Error;
 			}
 
@@ -1143,7 +1161,7 @@ err_eof:
 			}
 			else
 			{
-				SetError( "expected '%c', got '0x%02x' @ %i", ']', Char(type), Index() );
+				SetError( "expected '%c', got %s @ %i", ']', Char(type), Index() );
 				return Token_Error;
 			}
 		}
@@ -1154,7 +1172,7 @@ err_eof:
 		switch ( type )
 		{
 			case Token_Integer:
-				if ( token.len > FMT_INT_LEN )
+				if ( token.len > FMT_UINT32_LEN + 1 )
 				{
 					SetError( "invalid integer literal @ %i", Index() );
 					return Token_Error;

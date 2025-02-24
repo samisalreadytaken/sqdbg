@@ -158,33 +158,39 @@ Available special keywords: `$function`, `$caller`, `$stack`
 
 ### Function breakpoints
 
-Use the syntax `funcname,filename:line` to set breakpoint on function _funcname_ found in file _filename_ at line _line_. `filename` and `line` are optional settings.
+Use the syntax `funcname,filename:line` to set breakpoints on specific functions from specific files. `filename` and `line` are optional settings.
 
 Use the function name `()` to set breakpoints on anonymous functions.
 
-Line number is the line where the first instruction in a function is defined, or the opening bracket of the function if it was compiled without debuginfo. The breakpoints representing the functions below would be `constructor,script.nut:20` and `(),script.nut:26` (with debuginfo), or `constructor,script.nut:18` and `(),script.nut:24` (without debuginfo) respectively.
+Line number is the line where the first instruction in a function is defined, or the opening bracket of the function if it was compiled without debuginfo.
 
 ```
- 16
+ 14
+ 15 // `constructor,script.nut:20` (with debuginfo)
+ 16 // `constructor,script.nut:18` (without debuginfo)
  17 function CTest::constructor()
  18 {
  19
  20     local a = 1;
  21 }
  22
- 23 local fn = function()
- 24 {
- 25
- 26     dummy();
- 27 }
- 28
+ 23 // `(),script.nut:28` (with debuginfo)
+ 24 // `(),script.nut:26` (without debuginfo)
+ 25 local fn = function()
+ 26 {
+ 27
+ 28     dummy();
+ 29 }
+ 30
 ```
 
 ### Tracepoint / Logpoint
 
-Expressions and format specifiers within `{}` are evaluated. Escape the opening bracket to print brackets `\{`.
+Expressions and format specifiers within `{}` are evaluated.
 
 Available special keywords: `$FUNCTION`, `$CALLER`, `$HITCOUNT`
+
+Escapable characters: `\`, `{`, `$`, `n`, `t`
 
 ### Class definitions
 
@@ -320,8 +326,8 @@ function IntersectRayWithPlane( org, dir, normal, dist )
 }
 
 local out = sqdbg_disassemble( IntersectRayWithPlane );
-foreach ( line in split(out, "\n") )
-	print( line );
+foreach ( line in split( out, "\n" ) )
+	print( line + "\n" );
 ```
 
 Output:
@@ -354,7 +360,7 @@ this, org, dir, normal, dist
 
 Script function         | Description
 ------------------------|--------------
-`sqdbg_break`           | Break execution if a client is connected
+`sqdbg_break`           | Break execution on the next instruction
 `sqdbg_watch`           | Add data breakpoint on expression with optional condition and hit count
 
 ### Profiler
@@ -471,7 +477,7 @@ If source files are unavailable, you may always use the disassembly view.
 
 ### Function breakpoints
 
-Adding named function breakpoints require the desired functions to be compiled in the syntax `function MyFunc()` instead of `MyFunc <- function()`. In Squirrel, the former sets the name of the function while the latter creates a nameless, anonymous function which can be broken into by specifying file name and line number in the anonymous function breakpoint.
+Adding named function breakpoints requires the desired functions to be compiled in the syntax `function MyFunc()` instead of `MyFunc <- function()`. In Squirrel, the former sets the name of the function while the latter creates a nameless, anonymous function which can be broken into by specifying file name and line number in the anonymous function breakpoint.
 
 ### Special accessors
 
