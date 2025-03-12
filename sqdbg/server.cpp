@@ -19154,3 +19154,8 @@ void sqdbg_on_script_compile( HSQDEBUGSERVER dbg,
 {
 	dbg->OnScriptCompile( script, scriptlen, sourcename, sourcenamelen );
 }
+
+int sqdbg_is_client_connected( HSQDEBUGSERVER dbg )
+{
+	return dbg->IsClientConnected();
+}

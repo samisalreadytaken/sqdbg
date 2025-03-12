@@ -64,6 +64,10 @@ SQDBG_API void sqdbg_on_script_compile( HSQDEBUGSERVER dbg,
 		const SQChar *script, SQInteger scriptlen,
 		const SQChar *sourcename, SQInteger sourcenamelen );
 
+// Check if a client is connected to the debugger
+// Returns 0 if there is no client connected
+SQDBG_API int sqdbg_is_client_connected( HSQDEBUGSERVER dbg );
+
 #ifdef __cplusplus
 }
 #endif
