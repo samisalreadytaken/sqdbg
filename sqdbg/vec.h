@@ -111,7 +111,44 @@ public:
 	}
 };
 
-template< int MEM_CACHE_CHUNKS_ALIGN = 2048 >
+// GCC requires this to be outside of the class
+template < bool S >
+struct _CScratch_members;
+
+template <>
+struct _CScratch_members< true >
+{
+	int m_LastFreeChunk;
+	int m_LastFreeIndex;
+	int m_PrevChunk;
+	int m_PrevIndex;
+
+	int LastFreeChunk() { return m_LastFreeChunk; }
+	int LastFreeIndex() { return m_LastFreeIndex; }
+	int PrevChunk() { return m_PrevChunk; }
+	int PrevIndex() { return m_PrevIndex; }
+
+	void SetLastFreeChunk( int i ) { m_LastFreeChunk = i; }
+	void SetLastFreeIndex( int i ) { m_LastFreeIndex = i; }
+	void SetPrevChunk( int i ) { m_PrevChunk = i; }
+	void SetPrevIndex( int i ) { m_PrevIndex = i; }
+};
+
+template <>
+struct _CScratch_members< false >
+{
+	int LastFreeChunk() { return 0; }
+	int LastFreeIndex() { return 0; }
+	int PrevChunk() { return 0; }
+	int PrevIndex() { return 0; }
+
+	void SetLastFreeChunk( int ) {}
+	void SetLastFreeIndex( int ) {}
+	void SetPrevChunk( int ) {}
+	void SetPrevIndex( int ) {}
+};
+
+template< bool SEQUENTIAL, int MEM_CACHE_CHUNKS_ALIGN = 2048 >
 class CScratch
 {
 public:
@@ -126,8 +163,7 @@ public:
 
 	chunk_t *m_Memory;
 	int m_MemChunkCount;
-	int m_LastFreeChunk;
-	int m_LastFreeIndex;
+	_CScratch_members< SEQUENTIAL > m;
 
 	char *Get( int index )
 	{
@@ -145,7 +181,7 @@ public:
 		return &chunk->ptr[ msgIdx * MEM_CACHE_CHUNKSIZE ];
 	}
 
-	char *Alloc( int size, int *index = NULL, bool sequential = true )
+	char *Alloc( int size, int *index = NULL )
 	{
 		if ( !m_Memory )
 		{
@@ -166,11 +202,11 @@ public:
 		int chunkIdx;
 		int matchedChunks = 0;
 
-		if ( sequential )
+		if ( SEQUENTIAL )
 		{
 			requiredChunks = ( size - 1 ) / MEM_CACHE_CHUNKSIZE + 1;
-			msgIdx = m_LastFreeIndex;
-			chunkIdx = m_LastFreeChunk;
+			msgIdx = m.LastFreeIndex();
+			chunkIdx = m.LastFreeChunk();
 		}
 		else
 		{
@@ -184,14 +220,17 @@ public:
 			chunk_t *chunk = &m_Memory[ chunkIdx ];
 			Assert( chunk->count && chunk->ptr );
 
-			if ( sequential )
+			if ( SEQUENTIAL )
 			{
 				int remainingChunks = chunk->count - msgIdx;
 
 				if ( remainingChunks >= requiredChunks )
 				{
-					m_LastFreeIndex = msgIdx + requiredChunks;
-					m_LastFreeChunk = chunkIdx;
+					m.SetPrevChunk( m.LastFreeChunk() );
+					m.SetPrevIndex( m.LastFreeIndex() );
+
+					m.SetLastFreeIndex( msgIdx + requiredChunks );
+					m.SetLastFreeChunk( chunkIdx );
 
 					if ( index )
 					{
@@ -267,6 +306,7 @@ public:
 
 	void Free( void *ptr )
 	{
+		Assert( !SEQUENTIAL );
 		Assert( m_Memory );
 		Assert( ptr );
 
@@ -290,7 +330,8 @@ public:
 
 		Assert( found );
 
-		(*(unsigned char**)&ptr)[ *(int*)ptr + sizeof(int) - 1 ] = 0xdd;
+		if ( *(int*)ptr )
+			(*(unsigned char**)&ptr)[ *(int*)ptr + sizeof(int) - 1 ] = 0xdd;
 #endif
 
 		memset( (char*)ptr, 0, *(int*)ptr + sizeof(int) );
@@ -315,12 +356,16 @@ public:
 
 		m_Memory = NULL;
 		m_MemChunkCount = 4;
-		m_LastFreeChunk = 0;
-		m_LastFreeIndex = 0;
+		m.SetLastFreeChunk( 0 );
+		m.SetLastFreeIndex( 0 );
+		m.SetPrevChunk( 0 );
+		m.SetPrevIndex( 0 );
 	}
 
 	void ReleaseShrink()
 	{
+		Assert( SEQUENTIAL );
+
 		if ( !m_Memory )
 			return;
 
@@ -359,13 +404,17 @@ public:
 			AssertOOM( m_Memory, m_MemChunkCount * sizeof(chunk_t) );
 		}
 
-		m_LastFreeChunk = 0;
-		m_LastFreeIndex = 0;
+		m.SetLastFreeChunk( 0 );
+		m.SetLastFreeIndex( 0 );
+		m.SetPrevChunk( 0 );
+		m.SetPrevIndex( 0 );
 	}
 
 	void Release()
 	{
-		if ( !m_Memory || ( !m_LastFreeChunk && !m_LastFreeIndex ) )
+		Assert( SEQUENTIAL );
+
+		if ( !m_Memory || ( !m.LastFreeChunk() && !m.LastFreeIndex() ) )
 			return;
 
 #ifdef _DEBUG
@@ -380,8 +429,18 @@ public:
 		}
 #endif
 
-		m_LastFreeChunk = 0;
-		m_LastFreeIndex = 0;
+		m.SetLastFreeChunk( 0 );
+		m.SetLastFreeIndex( 0 );
+		m.SetPrevChunk( 0 );
+		m.SetPrevIndex( 0 );
+	}
+
+	void ReleaseTop()
+	{
+		Assert( SEQUENTIAL );
+
+		m.SetLastFreeChunk( m.PrevChunk() );
+		m.SetLastFreeIndex( m.PrevIndex() );
 	}
 };
 

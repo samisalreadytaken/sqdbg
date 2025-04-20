@@ -150,9 +150,22 @@ Flagging a watch expression 'locked' (`*` after a comma) will maintain the scope
 
 ### Extended watch expressions
 
-Binary literals with logical, arithmetic and bitwise operators are usable within watch expressions.
+Binary literals are usable within watch expressions.
 
-`~( 0b0101 >> ( -rand() & 012 ) ) - -0xf,b : 0b00001101`
+`0451 & ~0b1010,b : 0b0000000100100001`
+
+Reference counted Squirrel objects can be tracked by their addresses with the `*` operator.
+
+```
+arr <- "arr" !in this || typeof arr != "array" ? ["A" * 2, "B" * 4] : arr : (array)   : 0x010C5F20 {size=2}
+arr                      : (array)   : 0x010C5F20 {size=2}
+arr == *0x010C5F20       : (bool)    : true
+&arr == 0x010C5F20       : (bool)    : true
+*0x010C5F20,lna          : (array)   : ["AA", "BBBB"]
+(*0x010C5F20)[0]         : (string)  : "AA"
+(*0x010C5F20).$allocated : (integer) : 4
+(*0x010C5F20).$size      : (integer) : 2
+```
 
 Available special keywords: `$function`, `$caller`, `$stack`
 
@@ -191,6 +204,8 @@ Expressions and format specifiers within `{}` are evaluated.
 Available special keywords: `$FUNCTION`, `$CALLER`, `$HITCOUNT`
 
 Escapable characters: `\`, `{`, `$`, `n`, `t`
+
+If the entire expression is wrapped between `{/` and `}`, it is executed without breaking or printing.
 
 ### Class definitions
 

@@ -62,12 +62,12 @@ class json_array_t
 {
 public:
 	const char *m_pBase;
-	CScratch< JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
+	CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
 	int *m_Elements;
 	unsigned short m_nElementCount;
 	unsigned short m_nElementsSize;
 
-	void Init( const char *base, CScratch< JSON_SCRATCH_CHUNK_SIZE > *allocator )
+	void Init( const char *base, CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *allocator )
 	{
 		m_pBase = base;
 		m_Allocator = allocator;
@@ -138,12 +138,12 @@ class json_table_t
 {
 public:
 	const char *m_pBase;
-	CScratch< JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
+	CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
 	int *m_Elements;
 	unsigned short m_nElementCount;
 	unsigned short m_nElementsSize;
 
-	void Init( const char *base, CScratch< JSON_SCRATCH_CHUNK_SIZE > *allocator )
+	void Init( const char *base, CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *allocator )
 	{
 		m_pBase = base;
 		m_Allocator = allocator;
@@ -266,11 +266,20 @@ public:
 	bool Get( const string_t &key, json_array_t **out ) const { return GetArray( key, out ); }
 };
 
-static inline void PutStrL( CBuffer *buffer, const string_t &str )
+static inline void PutStr( CBuffer *buffer, const string_t &str )
 {
 	buffer->base.Ensure( buffer->Size() + str.len );
 	memcpy( buffer->Base() + buffer->Size(), str.ptr, str.len );
 	buffer->size += str.len;
+
+#ifdef SQDBG_VALIDATE_SENT_MSG
+	for ( unsigned int i = 0; i < str.len; i++ )
+	{
+		AssertMsg( IN_RANGE_CHAR( str.ptr[i], 0x20, 0x7E ) &&
+				( ( str.ptr[i] != '\\' && str.ptr[i] != '\"' ) || ( i && str.ptr[i-1] == '\\' ) ),
+				"control char in json string" );
+	}
+#endif
 }
 
 static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
@@ -278,7 +287,7 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 	const char *c = str.ptr;
 	unsigned int i = str.len;
 
-	unsigned int len = 2 + i;
+	unsigned int len = i;
 
 	if ( quote )
 		len += 4;
@@ -287,18 +296,19 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 	{
 		switch ( *c )
 		{
-			case '\"': case '\\': case '\b':
-			case '\f': case '\n': case '\r': case '\t':
+			case '\\': case '\"':
+			case '\a': case '\b': case '\f':
+			case '\n': case '\r': case '\t': case '\v':
 				len++;
 				if ( quote )
 				{
 					len++;
-					if ( *c == '\"' || *c == '\\' )
+					if ( *c == '\\' || *c == '\"' )
 						len++;
 				}
 				break;
 			default:
-				if ( !IN_RANGE_CHAR( *(unsigned char*)c, 0x20, 0x7E ) )
+				if ( !IN_RANGE_CHAR( *c, 0x20, 0x7E ) )
 				{
 					int ret = IsValidUTF8( (unsigned char*)c, i + 1 );
 					if ( ret != 0 )
@@ -329,8 +339,6 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 	c = str.ptr;
 	i = str.len;
 
-	mem[idx++] = '\"';
-
 	if ( quote )
 	{
 		mem[idx++] = '\\';
@@ -343,6 +351,7 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 
 		switch ( *c )
 		{
+			case '\\':
 			case '\"':
 				mem[idx-1] = '\\';
 				if ( quote )
@@ -350,15 +359,13 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 					mem[idx++] = '\\';
 					mem[idx++] = '\\';
 				}
-				mem[idx++] = '\"';
+				mem[idx++] = *c;
 				break;
-			case '\\':
+			case '\a':
+				mem[idx-1] = '\\';
 				if ( quote )
-				{
 					mem[idx++] = '\\';
-					mem[idx++] = '\\';
-				}
-				mem[idx++] = '\\';
+				mem[idx++] = 'a';
 				break;
 			case '\b':
 				mem[idx-1] = '\\';
@@ -390,8 +397,14 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 					mem[idx++] = '\\';
 				mem[idx++] = 't';
 				break;
+			case '\v':
+				mem[idx-1] = '\\';
+				if ( quote )
+					mem[idx++] = '\\';
+				mem[idx++] = 'v';
+				break;
 			default:
-				if ( !IN_RANGE_CHAR( *(unsigned char*)c, 0x20, 0x7E ) )
+				if ( !IN_RANGE_CHAR( *c, 0x20, 0x7E ) )
 				{
 					int ret = IsValidUTF8( (unsigned char*)c, i + 1 );
 					if ( ret != 0 )
@@ -433,8 +446,6 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 		mem[idx++] = '\"';
 	}
 
-	mem[idx++] = '\"';
-
 	buffer->size = idx;
 }
 
@@ -445,15 +456,14 @@ static inline void PutStr( CBuffer *buffer, const sqstring_t &str, bool quote )
 
 	if ( !quote )
 	{
-		len = 2 + UTF8Length< kUTFEscapeJSON >( str.ptr, str.len );
+		len = UTF8Length< kUTFEscapeJSON >( str.ptr, str.len );
 	}
 	else
 	{
-		len = 2 + UTF8Length< kUTFEscapeQuoted >( str.ptr, str.len );
+		len = UTF8Length< kUTFEscapeQuoted >( str.ptr, str.len );
 	}
 
 	buffer->base.Ensure( buffer->Size() + len );
-	buffer->Base()[buffer->size++] = '\"';
 
 	if ( !quote )
 	{
@@ -473,7 +483,6 @@ static inline void PutStr( CBuffer *buffer, const sqstring_t &str, bool quote )
 	}
 
 	buffer->size += len;
-	buffer->Base()[buffer->size++] = '\"';
 }
 #endif
 
@@ -484,25 +493,89 @@ static inline void PutChar( CBuffer *buffer, char c )
 }
 
 template < typename I >
-static inline void PutInt( CBuffer *buffer, I val, bool hex = false )
+static inline void PutInt( CBuffer *buffer, I val )
 {
-	int len;
 	buffer->base.Ensure( buffer->Size() + countdigits( val ) + 1 );
-
-	if ( !hex )
-	{
-		len = printint( buffer->Base() + buffer->Size(), buffer->Capacity() - buffer->Size(), val );
-	}
-	else
-	{
-		len = printhex< false >( buffer->Base() + buffer->Size(), buffer->Capacity() - buffer->Size(), val );
-	}
-
+	int len = printint( buffer->Base() + buffer->Size(), buffer->Capacity() - buffer->Size(), val );
 	buffer->size += len;
 }
 
-class wjson_table_t;
-class wjson_array_t;
+template < bool padding, typename I >
+static inline void PutHex( CBuffer *buffer, I val )
+{
+	buffer->base.Ensure( buffer->Size() + countdigits<16>( val ) + 1 );
+	int len = printhex< padding >( buffer->Base() + buffer->Size(), buffer->Capacity() - buffer->Size(), val );
+	buffer->size += len;
+}
+
+struct jstringbuf_t
+{
+	CBuffer *m_pBuffer;
+
+	jstringbuf_t( CBuffer *b ) : m_pBuffer(b)
+	{
+		::PutChar( m_pBuffer, '\"' );
+	}
+
+	~jstringbuf_t()
+	{
+		::PutChar( m_pBuffer, '\"' );
+	}
+
+	jstringbuf_t( const jstringbuf_t &src );
+
+	void Seek( int i )
+	{
+		m_pBuffer->size += i;
+	}
+
+	template < int SIZE >
+	void Puts( const char (&str)[SIZE] )
+	{
+		::PutStr( m_pBuffer, str );
+	}
+
+	void Puts( const conststring_t &str )
+	{
+		::PutStr( m_pBuffer, str );
+	}
+
+	void Puts( const string_t &str, bool quote = false )
+	{
+		::PutStr( m_pBuffer, str, quote );
+	}
+
+#ifdef SQUNICODE
+	void Puts( const sqstring_t &str, bool quote = false )
+	{
+		::PutStr( m_pBuffer, str, quote );
+	}
+#endif
+
+	void Put( char c )
+	{
+		::PutChar( m_pBuffer, c );
+	}
+
+	template < typename I >
+	void PutInt( I val )
+	{
+		::PutInt( m_pBuffer, val );
+	}
+
+	template < typename I >
+	void PutHex( I val, bool padding = true )
+	{
+		if ( padding )
+		{
+			::PutHex< true >( m_pBuffer, val );
+		}
+		else
+		{
+			::PutHex< false >( m_pBuffer, val );
+		}
+	}
+};
 
 class wjson_t
 {
@@ -542,7 +615,7 @@ public:
 			PutChar( m_pBuffer, ',' );
 
 		PutChar( m_pBuffer, '\"' );
-		PutStrL( m_pBuffer, key );
+		PutStr( m_pBuffer, key );
 		PutChar( m_pBuffer, '\"' );
 		PutChar( m_pBuffer, ':' );
 	}
@@ -556,26 +629,53 @@ public:
 	void SetNull( const string_t &key )
 	{
 		PutKey( key );
-		PutStrL( m_pBuffer, "null" );
+		PutStr( m_pBuffer, "null" );
 	}
 
 	void SetBool( const string_t &key, bool val )
 	{
 		PutKey( key );
-		PutStrL( m_pBuffer, val ? string_t("true") : string_t("false") );
+		PutStr( m_pBuffer, val ? string_t("true") : string_t("false") );
+	}
+
+	jstringbuf_t SetStringAsBuf( const string_t &key )
+	{
+		PutKey( key );
+		return { m_pBuffer };
+	}
+
+	template < int SIZE >
+	void SetString( const string_t &key, const char (&val)[SIZE] )
+	{
+		PutKey( key );
+		PutChar( m_pBuffer, '\"' );
+		PutStr( m_pBuffer, val );
+		PutChar( m_pBuffer, '\"' );
+	}
+
+	void SetString( const string_t &key, const conststring_t &val )
+	{
+		PutKey( key );
+		PutChar( m_pBuffer, '\"' );
+		PutStr( m_pBuffer, val );
+		PutChar( m_pBuffer, '\"' );
 	}
 
 	void SetString( const string_t &key, const string_t &val, bool quote = false )
 	{
 		PutKey( key );
+		PutChar( m_pBuffer, '\"' );
 		PutStr( m_pBuffer, val, quote );
+		PutChar( m_pBuffer, '\"' );
 	}
 
 #ifdef SQUNICODE
 	void SetString( const string_t &key, const sqstring_t &val, bool quote = false )
 	{
 		PutKey( key );
+		PutChar( m_pBuffer, '\"' );
 		PutStr( m_pBuffer, val, quote );
+		PutChar( m_pBuffer, '\"' );
 	}
 #endif
 
@@ -593,7 +693,14 @@ public:
 		PutKey( key );
 		PutChar( m_pBuffer, '\"' );
 		PutChar( m_pBuffer, '[' );
-		PutInt( m_pBuffer, val, hex );
+		if ( !hex )
+		{
+			PutInt( m_pBuffer, val );
+		}
+		else
+		{
+			PutHex< false >( m_pBuffer, val );
+		}
 		PutChar( m_pBuffer, ']' );
 		PutChar( m_pBuffer, '\"' );
 	}
@@ -665,7 +772,7 @@ public:
 			PutChar( m_pBuffer, ',' );
 
 		PutChar( m_pBuffer, '\"' );
-		PutStrL( m_pBuffer, val );
+		PutStr( m_pBuffer, val );
 		PutChar( m_pBuffer, '\"' );
 	}
 };
@@ -676,7 +783,7 @@ private:
 	char *m_cur;
 	char *m_end;
 	char *m_start;
-	CScratch< JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
+	CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
 	char *m_error;
 
 	enum
@@ -693,7 +800,7 @@ private:
 	};
 
 public:
-	JSONParser( CScratch< JSON_SCRATCH_CHUNK_SIZE > *allocator, char *ptr, int len, json_table_t *pTable ) :
+	JSONParser( CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *allocator, char *ptr, int len, json_table_t *pTable ) :
 		m_cur( ptr ),
 		m_end( ptr + len + 1 ),
 		m_start( ptr ),
@@ -849,9 +956,8 @@ private:
 
 			if ( *m_cur == '\"' )
 			{
-				*m_cur = 0;
 				token.Assign( pStart, m_cur - pStart );
-				m_cur++;
+				*m_cur++ = 0;
 				break;
 			}
 
@@ -874,7 +980,7 @@ private:
 			// Defer unescape until the end of the string is found
 			switch ( *m_cur )
 			{
-				case '\"': case '\\': case '/':
+				case '\\': case '\"': case '/':
 				case 'b': case 'f':
 				case 'n': case 'r': case 't':
 					m_cur++;
@@ -921,16 +1027,15 @@ private:
 				{
 					case '\\':
 shift_one:
-						_shift( 0, 1 );
-						cur++;
+						_shift( 1, 2 );
 						break;
-					case '\"': goto shift_one;
-					case '/': goto shift_one;
-					case 'b': cur[1] = '\b'; goto shift_one;
-					case 'f': cur[1] = '\f'; goto shift_one;
-					case 'n': cur[1] = '\n'; goto shift_one;
-					case 'r': cur[1] = '\r'; goto shift_one;
-					case 't': cur[1] = '\t'; goto shift_one;
+					case '\"': cur[0] = '\"'; goto shift_one;
+					case '/': cur[0] = '/'; goto shift_one;
+					case 'b': cur[0] = '\b'; goto shift_one;
+					case 'f': cur[0] = '\f'; goto shift_one;
+					case 'n': cur[0] = '\n'; goto shift_one;
+					case 'r': cur[0] = '\r'; goto shift_one;
+					case 't': cur[0] = '\t'; goto shift_one;
 					case 'u':
 					{
 						unsigned int val;
@@ -1011,7 +1116,7 @@ shift_one:
 			if ( m_cur >= m_end )
 				goto err_eof;
 		}
-		else if ( IN_RANGE_CHAR( *(unsigned char*)m_cur, '1', '9' ) )
+		else if ( IN_RANGE_CHAR( *m_cur, '1', '9' ) )
 		{
 			do
 			{
@@ -1019,7 +1124,7 @@ shift_one:
 				if ( m_cur >= m_end )
 					goto err_eof;
 			}
-			while ( IN_RANGE_CHAR( *(unsigned char*)m_cur, '0', '9' ) );
+			while ( IN_RANGE_CHAR( *m_cur, '0', '9' ) );
 		}
 		else
 		{
@@ -1034,7 +1139,7 @@ shift_one:
 			type = Token_Float;
 			m_cur++;
 
-			while ( m_cur < m_end && IN_RANGE_CHAR( *(unsigned char*)m_cur, '0', '9' ) )
+			while ( m_cur < m_end && IN_RANGE_CHAR( *m_cur, '0', '9' ) )
 				m_cur++;
 
 			if ( m_cur >= m_end )
@@ -1057,7 +1162,7 @@ shift_one:
 					goto err_eof;
 			}
 
-			while ( m_cur < m_end && IN_RANGE_CHAR( *(unsigned char*)m_cur, '0', '9' ) )
+			while ( m_cur < m_end && IN_RANGE_CHAR( *m_cur, '0', '9' ) )
 				m_cur++;
 		}
 

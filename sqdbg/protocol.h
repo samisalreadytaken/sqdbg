@@ -133,7 +133,7 @@ inline bool DAP_ReadHeader( char **ppMsg, int *pLength )
 				if ( pMsg >= pMemEnd )
 					return false;
 
-				if ( IN_RANGE_CHAR( *(unsigned char*)pMsg, '0', '9' ) )
+				if ( IN_RANGE_CHAR( *pMsg, '0', '9' ) )
 				{
 					nContentLength = nContentLength * 10 + *pMsg - '0';
 					pMsg++;
@@ -198,7 +198,7 @@ invalid:
 }
 
 #ifdef SQDBG_VALIDATE_SENT_MSG
-inline void DAP_Test( CScratch< JSON_SCRATCH_CHUNK_SIZE > *scratch, CBuffer *buffer )
+inline void DAP_Test( CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *scratch, CBuffer *buffer )
 {
 	char *pMsg = buffer->Base();
 	int nLength = buffer->Size();
