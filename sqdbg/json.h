@@ -275,9 +275,13 @@ static inline void PutStr( CBuffer *buffer, const string_t &str )
 #ifdef SQDBG_VALIDATE_SENT_MSG
 	for ( unsigned int i = 0; i < str.len; i++ )
 	{
-		AssertMsg( IN_RANGE_CHAR( str.ptr[i], 0x20, 0x7E ) &&
-				( ( str.ptr[i] != '\\' && str.ptr[i] != '\"' ) || ( i && str.ptr[i-1] == '\\' ) ),
-				"control char in json string" );
+		if ( str.ptr[i] == '\\' && ( str.ptr[i+1] == '\\' || str.ptr[i+1] == '\"' ) )
+		{
+			i++;
+			continue;
+		}
+
+		AssertMsg( IN_RANGE_CHAR( str.ptr[i], 0x20, 0x7E ), "control char in json string" );
 	}
 #endif
 }
@@ -877,6 +881,24 @@ private:
 		m_error[len] = 0;
 	}
 
+	bool IsValue( char token )
+	{
+		switch ( token )
+		{
+			case Token_String:
+			case Token_Integer:
+			case Token_Float:
+			case Token_False:
+			case Token_True:
+			case Token_Null:
+			case Token_Table:
+			case Token_Array:
+				return true;
+			default:
+				return false;
+		}
+	}
+
 	char NextToken( string_t &token )
 	{
 		while ( m_cur < m_end )
@@ -1206,7 +1228,7 @@ err_eof:
 			type = NextToken( token );
 			type = ParseValue( type, token, &kv->val );
 
-			if ( type == Token_Error )
+			if ( !IsValue( type ) )
 			{
 				SetError( "invalid token %s @ %i", Char(type), Index() );
 				return Token_Error;
@@ -1239,7 +1261,7 @@ err_eof:
 
 		for (;;)
 		{
-			if ( type == Token_Error )
+			if ( !IsValue( type ) )
 			{
 				SetError( "expected '%c', got %s @ %i", ']', Char(type), Index() );
 				return Token_Error;
@@ -1315,7 +1337,7 @@ err_eof:
 				value->type = JSON_NULL;
 				return type;
 			default:
-				return type;
+				return Token_Error;
 		}
 	}
 };

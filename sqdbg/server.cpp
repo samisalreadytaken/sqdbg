@@ -5,7 +5,7 @@
 // Squirrel Debugger
 //
 
-#define SQDBG_SV_VER 5
+#define SQDBG_SV_VER 6
 
 #include "sqdbg.h"
 
@@ -272,8 +272,14 @@ void sqdbg_sleep( int ms )
 	#define SUPPORTS_DEREF_OP
 
 	#if SQUIRREL_VERSION_NUMBER >= 300
-		#define CHAINABLE_FUNCPROTO
+		#define ACCESSIBLE_FUNCPROTO
 	#endif
+#endif
+
+#ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
+#ifndef ACCESSIBLE_FUNCPROTO
+	#define ACCESSIBLE_FUNCPROTO
+#endif
 #endif
 
 #include "str.h"
@@ -1972,6 +1978,9 @@ typedef enum
 	VARREF_INSTRUCTIONS,
 	VARREF_OUTERS,
 	VARREF_LITERALS,
+#ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
+	VARREF_FUNCTIONS,
+#endif
 	VARREF_METAMETHODS,
 	VARREF_ATTRIBUTES,
 	VARREF_CALLSTACK,
@@ -1993,6 +2002,9 @@ inline bool IsObjectRef( EVARREF type )
 			type == VARREF_INSTRUCTIONS ||
 			type == VARREF_OUTERS ||
 			type == VARREF_LITERALS ||
+#ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
+			type == VARREF_FUNCTIONS ||
+#endif
 			type == VARREF_METAMETHODS ||
 			type == VARREF_ATTRIBUTES ||
 			type == VARREF_CALLSTACK );
@@ -2079,6 +2091,9 @@ struct objref_t
 		DELEGABLE_META,
 		CUSTOMMEMBER,
 		STACK,
+#ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
+		FUNCPROTO,
+#endif
 		INT,
 		VIRTUAL_REF,
 		VIRTUAL_SIZE,
@@ -3700,12 +3715,12 @@ void SQDebugServer::ProcessRequest( const json_table_t &table, int seq )
 			ProfSwitchThread( m_pCurVM );
 #endif
 
-		OnRequest_RestartFrame( *arguments, seq );
-
 		RestoreCachedInstructions();
 		ClearCachedInstructions();
 
 		RemoveReturnValues();
+
+		OnRequest_RestartFrame( *arguments, seq );
 	}
 #endif
 	else if ( command.IsEqualTo( "gotoTargets" ) )
@@ -3735,12 +3750,12 @@ void SQDebugServer::ProcessRequest( const json_table_t &table, int seq )
 			ProfSwitchThread( m_pCurVM );
 #endif
 
-		OnRequest_Goto( *arguments, seq );
-
 		RestoreCachedInstructions();
 		ClearCachedInstructions();
 
 		RemoveReturnValues();
+
+		OnRequest_Goto( *arguments, seq );
 	}
 	else if ( command.IsEqualTo( "next" ) )
 	{
@@ -5945,7 +5960,7 @@ getfloat:
 				}
 				else
 				{
-					buf.PutHex( _table(obj)->CountUsed(), false );
+					buf.PutHex( (SQUnsignedInteger)_table(obj)->CountUsed(), false );
 				}
 
 				buf.Put('}');
@@ -6056,6 +6071,9 @@ getfloat:
 		}
 		case OT_CLOSURE:
 		case OT_NATIVECLOSURE:
+#ifdef ACCESSIBLE_FUNCPROTO
+		case OT_FUNCPROTO:
+#endif
 		{
 			const SQObjectPtr *name;
 
@@ -6063,10 +6081,17 @@ getfloat:
 			{
 				name = &_fp(_closure(obj)->_function)->_name;
 			}
-			else
+			else if ( sq_type(obj) == OT_NATIVECLOSURE )
 			{
 				name = &_nativeclosure(obj)->_name;
 			}
+#ifdef ACCESSIBLE_FUNCPROTO
+			else if ( sq_type(obj) == OT_FUNCPROTO )
+			{
+				name = &_funcproto(obj)->_name;
+			}
+#endif
+			else UNREACHABLE();
 
 			if ( sq_type(*name) == OT_STRING )
 			{
@@ -6195,7 +6220,7 @@ SQString *SQDebugServer::GetLocalVarName( const SQFunctionProto *func, const SQI
 		const SQLocalVarInfo &var = func->_localvarinfos[i];
 
 		if ( (unsigned int)var._pos == pos &&
-				var._start_op <= ip + s_nTargetAssignment && var._end_op + 1 >= ip )
+				var._start_op <= ip + s_nTargetAssignment && var._end_op >= ip )
 		{
 			return sq_type(var._name) == OT_STRING ? _string(var._name) : NULL;
 		}
@@ -6235,12 +6260,48 @@ void SQDebugServer::PrintOuter( const SQFunctionProto *func, int pos, stringbufe
 
 void SQDebugServer::PrintLiteral( const SQFunctionProto *func, int pos, stringbufext_t &buf )
 {
-	string_t val = GetValue( func->_literals[pos] );
+	const SQObjectPtr &val = func->_literals[pos];
 
-	if ( val.len > 64 )
-		val.len = 64;
+	switch ( sq_type(val) )
+	{
+		case OT_INTEGER:
+		case OT_FLOAT:
+		case OT_BOOL:
+		case OT_NULL:
+		case OT_STRING:
+		{
+			string_t str = GetValue( val );
 
-	buf.Puts( val );
+			if ( str.len > 64 )
+				str.len = 64;
+
+			buf.Puts( str );
+			break;
+		}
+		case OT_CLASS:
+		case OT_INSTANCE:
+		{
+			const classdef_t *def =
+				FindClassDef( sq_type(val) == OT_CLASS ? _class(val) : _instance(val)->_class );
+
+			if ( def && def->name.ptr )
+			{
+				buf.Puts( GetType( val ) );
+				buf.Put( ' ' );
+
+				string_t str;
+				str.Assign( def->name.ptr + FMT_PTR_LEN + 1, def->name.len - FMT_PTR_LEN - 1 );
+
+				if ( str.len > 64 - 9 )
+					str.len = 64 - 9;
+
+				buf.Puts( str );
+				break;
+			}
+		}
+		default:
+			buf.Puts( GetType( val ) );
+	}
 }
 
 void SQDebugServer::PrintStackTarget( const SQFunctionProto *func, const SQInstruction *instr,
@@ -6287,9 +6348,19 @@ void SQDebugServer::DescribeInstruction( const SQInstruction *instr, const SQFun
 	{
 		case _OP_LOADNULLS:
 		{
-			PrintStackVar( func, instr, instr->_arg0, buf );
-			buf.Put( ' ' );
-			buf.PutInt( instr->_arg1 );
+			if ( instr->_arg1 == 1 )
+			{
+				PrintStackVar( func, instr, instr->_arg0, buf );
+			}
+			else
+			{
+				buf.Put( '[' );
+				buf.PutInt( (int)instr->_arg0 );
+				buf.Put( ']' );
+				buf.Put( ' ' );
+				buf.PutInt( instr->_arg1 );
+			}
+
 			break;
 		}
 		case _OP_LOADINT:
@@ -7849,6 +7920,13 @@ bool SQDebugServer::Get( const objref_t &obj, SQObjectPtr &value )
 
 			return false;
 		}
+#ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
+		case objref_t::FUNCPROTO:
+		{
+			value = *obj.ptr;
+			return true;
+		}
+#endif
 		case objref_t::INT:
 		{
 			value = (SQInteger)obj.val;
@@ -8036,6 +8114,23 @@ bool SQDebugServer::Set( const objref_t &obj, const SQObjectPtr &value )
 
 			return false;
 		}
+#ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
+		case objref_t::FUNCPROTO:
+		{
+			if ( sq_type(value) == OT_FUNCPROTO )
+			{
+				*obj.ptr = value;
+				return true;
+			}
+			else if ( sq_type(value) == OT_CLOSURE )
+			{
+				*obj.ptr = _closure(value)->_function;
+				return true;
+			}
+
+			return false;
+		}
+#endif
 		default: UNREACHABLE();
 	}
 }
@@ -11189,6 +11284,7 @@ private:
 									token._string.IsEqualTo("throw") ||
 									token._string.IsEqualTo("static") ||
 									token._string.IsEqualTo("return") ||
+									token._string.IsEqualTo("resume") ||
 									token._string.IsEqualTo("foreach") ||
 									token._string.IsEqualTo("function") )
 							{
@@ -12625,11 +12721,13 @@ bool SQDebugServer::GetObj_VarRef( const varref_t *ref, string_t &expression, ob
 		}
 		case VARREF_OUTERS:
 		{
-			AssertClient( sq_type(ref->GetVar()) == OT_CLOSURE );
+			SQObject target = ref->GetVar();
 
-			if ( sq_type(ref->GetVar()) == OT_CLOSURE )
+			AssertClient( sq_type(target) == OT_CLOSURE );
+
+			if ( sq_type(target) == OT_CLOSURE )
 			{
-				SQClosure *pClosure = _closure(ref->GetVar());
+				SQClosure *pClosure = _closure(target);
 				SQFunctionProto *func = _fp(pClosure->_function);
 
 				for ( int i = 0; i < func->_noutervalues; i++ )
@@ -12649,16 +12747,18 @@ bool SQDebugServer::GetObj_VarRef( const varref_t *ref, string_t &expression, ob
 		}
 		case VARREF_LITERALS:
 		{
-			AssertClient( sq_type(ref->GetVar()) == OT_CLOSURE );
+			SQObject target = ref->GetVar();
 
-			if ( sq_type(ref->GetVar()) == OT_CLOSURE )
+			AssertClient( sq_type(target) == OT_FUNCPROTO );
+
+			if ( sq_type(target) == OT_FUNCPROTO )
 			{
 				int idx;
 				if ( atoi( expression, &idx ) &&
-						idx >= 0 && idx < (int)_fp(_closure(ref->GetVar())->_function)->_nliterals )
+						idx >= 0 && idx < (int)_funcproto(target)->_nliterals )
 				{
 					out.type = objref_t::PTR;
-					out.ptr = &_fp(_closure(ref->GetVar())->_function)->_literals[idx];
+					out.ptr = &_funcproto(target)->_literals[idx];
 					value = *out.ptr;
 					return true;
 				}
@@ -12666,6 +12766,29 @@ bool SQDebugServer::GetObj_VarRef( const varref_t *ref, string_t &expression, ob
 
 			return false;
 		}
+#ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
+		case VARREF_FUNCTIONS:
+		{
+			SQObject target = ref->GetVar();
+
+			AssertClient( sq_type(target) == OT_FUNCPROTO );
+
+			if ( sq_type(target) == OT_FUNCPROTO )
+			{
+				int idx;
+				if ( atoi( expression, &idx ) &&
+						idx >= 0 && idx < (int)_funcproto(target)->_nfunctions )
+				{
+					out.type = objref_t::FUNCPROTO;
+					out.ptr = &_funcproto(target)->_functions[idx];
+					value = *out.ptr;
+					return true;
+				}
+			}
+
+			return false;
+		}
+#endif
 		case VARREF_METAMETHODS:
 		{
 			int mm = -1;
@@ -12711,28 +12834,44 @@ bool SQDebugServer::GetObj_VarRef( const varref_t *ref, string_t &expression, ob
 		}
 		case VARREF_STACK:
 		{
-			AssertClient( expression.len > 2 );
+			AssertClient( expression.len > 5 );
 
-			if ( expression.len <= 2 )
+			if ( expression.len <= 5 )
 				return false;
 
-			while ( expression.len > 3 && expression.ptr[expression.len-1] != ']' )
+			while ( expression.len > 5 && expression.ptr[expression.len-1] != ']' )
 				expression.len--;
 
 			expression.ptr++;
 			expression.len -= 2;
 
-			int idx;
-			if ( strtoint( expression, &idx ) &&
-					idx >= 0 && idx < (int)ref->GetThread()->_stack.size() )
-			{
-				out.type = objref_t::PTR;
-				out.ptr = &ref->GetThread()->_stack._vals[idx];
-				value = *out.ptr;
-				return true;
-			}
+			AssertClient( expression.ptr[-1] == '[' );
+			char *pIdx = strchr( expression.ptr, ']' );
+			string_t strFrame( expression.ptr, pIdx - expression.ptr );
 
-			return false;
+			HSQUIRRELVM vm = ref->GetThread();
+
+			int frame;
+			if ( !pIdx || !strtoint( strFrame, &frame ) ||
+					frame < 0 || frame >= (int)vm->_callsstacksize )
+				return false;
+
+			int stackbase = GetStackBase( vm, frame );
+
+			expression.ptr += strFrame.len + 2;
+			expression.len -= strFrame.len + 2;
+
+			AssertClient( expression.ptr[-1] == '[' );
+
+			int idx;
+			if ( !strtoint( expression, &idx ) ||
+					stackbase + idx < 0 || stackbase + idx >= (int)vm->_stack.size() )
+				return false;
+
+			out.type = objref_t::PTR;
+			out.ptr = &vm->_stack._vals[ stackbase + idx ];
+			value = *out.ptr;
+			return true;
 		}
 		case VARREF_INSTRUCTIONS:
 		case VARREF_CALLSTACK:
@@ -13609,7 +13748,7 @@ void SQDebugServer::FillCompletions( const SQObjectPtr &target, HSQUIRRELVM vm, 
 
 					if ( def &&
 							sq_type(def->metamembers) != OT_NULL &&
-							_instance(target)->GetMetaMethod( vm, MT_GET, mm ) )
+							_instance(env)->GetMetaMethod( vm, MT_GET, mm ) )
 					{
 						for ( unsigned int i = 0; i < _array(def->metamembers)->_values.size(); i++ )
 						{
@@ -14938,12 +15077,11 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 						break;
 					}
 					case OT_CLOSURE:
-#ifdef CHAINABLE_FUNCPROTO
-					// Only reachable through compiler address deref
+#ifdef ACCESSIBLE_FUNCPROTO
 					case OT_FUNCPROTO:
 #endif
 					{
-#ifdef CHAINABLE_FUNCPROTO
+#ifdef ACCESSIBLE_FUNCPROTO
 						SQFunctionProto *func = ( sq_type(target) == OT_CLOSURE ) ?
 							_fp(_closure(target)->_function) :
 							_funcproto(target);
@@ -15026,7 +15164,7 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 								}
 								else
 								{
-									buf.PutHex( nparams, false );
+									buf.PutHex( (unsigned int)nparams, false );
 								}
 
 								buf.Puts("...");
@@ -15071,18 +15209,36 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 							SetVirtualHint( elem );
 						}
 
-#ifdef CHAINABLE_FUNCPROTO
+#ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
+						if ( func->_nfunctions )
+						{
+							wjson_table_t elem = variables.AppendTable();
+							elem.SetString( "name", INTERNAL_TAG("functions") );
+							elem.SetString( "value", GetValue( func->_nfunctions, flags ) );
+							elem.SetInt( "variablesReference", ToVarRef( VARREF_FUNCTIONS, ToSQObject( func ) ) );
+							SetVirtualHint( elem );
+						}
+#endif
+
+						if ( func->_noutervalues )
+						{
+							wjson_table_t elem = variables.AppendTable();
+							elem.SetString( "name", INTERNAL_TAG("outervalues") );
+							elem.SetString( "value", GetValue( func->_noutervalues, flags ) );
+#ifdef ACCESSIBLE_FUNCPROTO
+							int v = ( sq_type(target) == OT_CLOSURE ) ? ToVarRef( VARREF_OUTERS, target ) : -1;
+							elem.SetInt( "variablesReference", v );
+#else
+							Assert( sq_type(target) == OT_CLOSURE );
+							elem.SetInt( "variablesReference", ToVarRef( VARREF_OUTERS, target ) );
+#endif
+							SetVirtualHint( elem );
+						}
+
+#ifdef ACCESSIBLE_FUNCPROTO
 						if ( sq_type(target) == OT_CLOSURE )
 #endif
 						{
-							if ( func->_noutervalues )
-							{
-								wjson_table_t elem = variables.AppendTable();
-								elem.SetString( "name", INTERNAL_TAG("outervalues") );
-								elem.SetString( "value", GetValue( func->_noutervalues, flags ) );
-								elem.SetInt( "variablesReference", ToVarRef( VARREF_OUTERS, target ) );
-								SetVirtualHint( elem );
-							}
 #ifdef CLOSURE_ENV_ISVALID
 							if ( CLOSURE_ENV_ISVALID( _closure(target)->_env ) )
 							{
@@ -15140,7 +15296,7 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 								}
 								else
 								{
-									buf.PutHex( nparams < 0 ? -nparams : nparams, false );
+									buf.PutHex( (unsigned int)( nparams < 0 ? -nparams : nparams ), false );
 								}
 
 								if ( nparams < 0 )
@@ -15486,6 +15642,40 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 
 			break;
 		}
+#ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
+		case VARREF_FUNCTIONS:
+		{
+			SQObject target = ref->GetVar();
+
+			if ( sq_type(target) != OT_FUNCPROTO )
+			{
+				DAP_ERROR_RESPONSE( seq, "variables" );
+				DAP_ERROR_BODY( 0, "invalid object" );
+				DAP_SEND();
+				return;
+			}
+
+			SQFunctionProto *func = _funcproto(target);
+
+			DAP_START_RESPONSE( seq, "variables" );
+			DAP_SET_TABLE( body );
+				wjson_array_t variables = body.SetArray( "variables" );
+
+				for ( int i = 0; i < func->_nfunctions; i++ )
+				{
+					const SQObjectPtr &val = func->_functions[i];
+
+					wjson_table_t elem = variables.AppendTable();
+					elem.SetIntString( "name", i );
+					JSONSetString( elem, "value", val, flags );
+					elem.SetString( "type", GetType( val ) );
+					elem.SetInt( "variablesReference", ToVarRef( val ) );
+				}
+			DAP_SEND();
+
+			break;
+		}
+#endif
 		case VARREF_METAMETHODS:
 		{
 			SQObject target = ref->GetVar();
@@ -15673,69 +15863,107 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 			DAP_SET_TABLE( body );
 				wjson_array_t variables = body.SetArray( "variables" );
 
-				int stackbase = -1;
-				int callframe = 0;
+				int stackbase = 0;
+				int callframe = -1;
+				int next = vm->_callsstacksize ? vm->_callsstack[0]._prevstkbase : 0;
+				int idx = 0;
+				const int max = vm->_stack.size();
 
-				if ( vm->_callsstacksize )
-					stackbase = vm->_callsstack[callframe]._prevstkbase;
-
-				for ( int i = 0; i < (int)vm->_stack.size(); i++ )
+				for (;;)
 				{
-					const SQObjectPtr &val = vm->_stack._vals[i];
+					callframe++;
 
-					if ( i > vm->_top && sq_type(val) == OT_NULL )
-						continue;
-
-					wjson_table_t elem = variables.AppendTable();
+					if ( callframe < vm->_callsstacksize )
 					{
-						jstringbuf_t name = elem.SetStringAsBuf( "name" );
-						name.Put('[');
+						stackbase = next;
 
-						if ( !( flags & kFS_Hexadecimal ) )
+						if ( callframe + 1 < vm->_callsstacksize )
 						{
-							name.PutInt( i );
+							next = stackbase + vm->_callsstack[ callframe + 1 ]._prevstkbase;
 						}
 						else
 						{
-							name.PutHex( i, false );
-						}
-
-						name.Put(']');
-
-						if ( stackbase == i )
-						{
-							name.Put('*');
-
-							if ( callframe == frame )
-							{
-								name.Put('~');
-							}
-#ifndef NATIVE_DEBUG_HOOK
-							else if ( m_State == ThreadState_Suspended &&
-									callframe == vm->_callsstacksize - 1 )
-							{
-								if ( sq_type(vm->_callsstack[callframe]._closure) == OT_NATIVECLOSURE &&
-										_nativeclosure(vm->_callsstack[callframe]._closure)->_function ==
-											&SQDebugServer::SQDebugHook )
-								{
-									name.Put('d');
-								}
-							}
-#endif
-
-							if ( ++callframe < vm->_callsstacksize )
-								stackbase += vm->_callsstack[callframe]._prevstkbase;
-						}
-						else if ( vm->_top == i )
-						{
-							name.Put('_');
+							next = max;
 						}
 					}
-					JSONSetString( elem, "value", val, flags );
-					elem.SetString( "type", GetType( val ) );
-					elem.SetInt( "variablesReference", ToVarRef( val ) );
-					if ( ShouldPageArray( val, 16 * ARRAY_PAGE_LIMIT ) )
-						elem.SetInt( "indexedVariables", (int)_array(val)->_values.size() );
+					else
+					{
+						if ( callframe )
+							callframe--;
+
+						next = max;
+					}
+
+					for ( ; idx < next; idx++ )
+					{
+						const SQObjectPtr &val = vm->_stack._vals[idx];
+
+						if ( idx > vm->_top && sq_type(val) == OT_NULL )
+							continue;
+
+						wjson_table_t elem = variables.AppendTable();
+						{
+							jstringbuf_t name = elem.SetStringAsBuf( "name" );
+							name.Put('[');
+
+							if ( !( flags & kFS_Hexadecimal ) )
+							{
+								name.PutInt( callframe );
+							}
+							else
+							{
+								name.PutHex( (unsigned int)callframe, false );
+							}
+
+							name.Put(']');
+							name.Put('[');
+
+							if ( !( flags & kFS_Hexadecimal ) )
+							{
+								name.PutInt( idx - stackbase );
+							}
+							else
+							{
+								name.PutHex( (unsigned int)( idx - stackbase ), false );
+							}
+
+							name.Put(']');
+
+							if ( idx == stackbase )
+							{
+								name.Put('*');
+
+								if ( callframe == frame )
+								{
+									name.Put('~');
+								}
+#ifndef NATIVE_DEBUG_HOOK
+								else if ( m_State == ThreadState_Suspended &&
+										callframe == vm->_callsstacksize - 1 )
+								{
+									if ( sq_type(vm->_callsstack[callframe]._closure) == OT_NATIVECLOSURE &&
+											_nativeclosure(vm->_callsstack[callframe]._closure)->_function ==
+												&SQDebugServer::SQDebugHook )
+									{
+										name.Put('d');
+									}
+								}
+#endif
+							}
+							else if ( vm->_top == idx )
+							{
+								name.Put('_');
+							}
+						}
+						JSONSetString( elem, "value", val, flags );
+						elem.SetString( "type", GetType( val ) );
+						elem.SetInt( "variablesReference", ToVarRef( val ) );
+						if ( ShouldPageArray( val, 16 * ARRAY_PAGE_LIMIT ) )
+							elem.SetInt( "indexedVariables", (int)_array(val)->_values.size() );
+					}
+
+					if ( next == max )
+						break;
 				}
 			DAP_SEND();
 
@@ -15865,7 +16093,7 @@ void SQDebugServer::OnRequest_SetVariable( const json_table_t &arguments, int se
 		DAP_ERROR_BODY( 0, "could not set '{name}'" );
 			error.SetBool( "showUser", true );
 			wjson_table_t variables = error.SetTable( "variables" );
-			JSONSetString( variables, "name", obj.key );
+			variables.SetString( "name", strName );
 		DAP_SEND();
 		return;
 	}
@@ -16342,7 +16570,7 @@ void SQDebugServer::OnRequest_Disassemble( const json_table_t &arguments, int se
 #ifdef SUPPORTS_RESTART_FRAME
 void SQDebugServer::OnRequest_RestartFrame( const json_table_t &arguments, int seq )
 {
-	Assert( m_State == ThreadState_Suspended );
+	AssertClient( m_State != ThreadState_Running );
 
 	HSQUIRRELVM vm;
 	int frame;
@@ -16846,7 +17074,7 @@ bool SQDebugServer::InstructionStep( HSQUIRRELVM vm, SQVM::CallInfo *ci, int ins
 	SQInstruction *instrEnd = func->_instructions + func->_ninstructions;
 	SQInstruction *ip = ci->_ip - instrOffset;
 
-	Assert( ip >= func->_instructions && ip < instrEnd );
+	Assert( ip >= func->_instructions );
 
 	{
 		for (;;)
@@ -16973,7 +17201,7 @@ bool SQDebugServer::Step( HSQUIRRELVM vm, SQVM::CallInfo *ci )
 	ClearCachedInstructions();
 
 	SQFunctionProto *func = _fp(_closure(ci->_closure)->_function);
-	Assert( ci->_ip >= func->_instructions && ci->_ip < func->_instructions + func->_ninstructions );
+	Assert( ci->_ip >= func->_instructions );
 
 	// Check if this function was compiled with debug info
 	// The first op is going to be a line op
@@ -17000,7 +17228,7 @@ bool SQDebugServer::Step( HSQUIRRELVM vm, SQVM::CallInfo *ci )
 	_CacheInstruction( func, func->_instructions + op );
 
 	// Set break point at every possible jump target
-	for ( SQInstruction *ip = ci->_ip + 1; ip <= func->_instructions + op; ip++ )
+	for ( SQInstruction *ip = ci->_ip; ip <= func->_instructions + op; ip++ )
 	{
 		if ( IsJumpOp( ip ) && GetJumpCount( ip ) != 0 )
 		{
@@ -17040,6 +17268,14 @@ void SQDebugServer::CacheInstruction( SQInstruction *instr )
 
 void SQDebugServer::ClearCachedInstructions()
 {
+#ifdef SQDBG_WEAK_INSTRUCTION_REF
+	for ( int i = m_CachedInstructions.Size(); i--; )
+	{
+		cachedinstr_t &cached = m_CachedInstructions[i];
+		__ObjRelease( cached.func );
+	}
+#endif
+
 	m_CachedInstructions.Clear();
 }
 
@@ -17050,10 +17286,7 @@ void SQDebugServer::RestoreCachedInstructions()
 		cachedinstr_t &cached = m_CachedInstructions[i];
 #ifdef SQDBG_WEAK_INSTRUCTION_REF
 		if ( cached.func && sq_type(cached.func->_obj) == OT_FUNCPROTO )
-		{
 			_funcproto(cached.func->_obj)->_instructions[ cached.index ] = cached.instr;
-			__ObjRelease( cached.func );
-		}
 #else
 		if ( cached.ip )
 			*cached.ip = cached.instr;
@@ -17068,10 +17301,7 @@ void SQDebugServer::UndoRestoreCachedInstructions()
 		cachedinstr_t &cached = m_CachedInstructions[i];
 #ifdef SQDBG_WEAK_INSTRUCTION_REF
 		if ( cached.func && sq_type(cached.func->_obj) == OT_FUNCPROTO )
-		{
 			memzero( &_funcproto(cached.func->_obj)->_instructions[ cached.index ] );
-			__ObjAddRef( cached.func );
-		}
 #else
 		if ( cached.ip )
 			memzero( cached.ip );
@@ -17828,6 +18058,10 @@ sqstring_t SQDebugServer::PrintDisassembly( SQClosure *target, SQChar *scratch, 
 		int idx;
 		if ( func->_ndefaultparams && ( idx = (int)func->_ndefaultparams - ( nparams - i ) ) >= 0 )
 		{
+			len = STRLEN(" = ");
+			memcpy( buf, _SC(" = "), sq_rsl(len) );
+			buf += len;
+
 			const SQObjectPtr &val = target->_defaultparams[idx];
 			string_t str;
 
@@ -17838,19 +18072,39 @@ sqstring_t SQDebugServer::PrintDisassembly( SQClosure *target, SQChar *scratch, 
 				case OT_BOOL:
 				case OT_NULL:
 				case OT_STRING:
-					str = GetValue( val, kFS_NoAddr );
+					str = GetValue( val );
+					len = min( str.len, DISASM_MAX_PARAM_NAME_LEN - 3 );
 					break;
+				case OT_CLASS:
+				case OT_INSTANCE:
+				{
+					const classdef_t *def =
+						FindClassDef( sq_type(val) == OT_CLASS ? _class(val) : _instance(val)->_class );
+
+					if ( def && def->name.ptr )
+					{
+						str = GetType( val );
+						len = min( (int)str.len, DISASM_MAX_PARAM_NAME_LEN - 4 );
+#ifdef SQUNICODE
+						UTF8ToSQUnicode( buf, _bs, str.ptr, len );
+#else
+						memcpy( buf, str.ptr, sq_rsl(len) );
+#endif
+						buf += len;
+						*buf++ = ' ';
+
+						str.Assign( def->name.ptr + FMT_PTR_LEN + 1, def->name.len - FMT_PTR_LEN - 1 );
+						len = min( (int)str.len, DISASM_MAX_PARAM_NAME_LEN - 4 - len );
+						break;
+					}
+				}
 				default:
 					str = GetType( val );
+					len = min( (int)str.len, DISASM_MAX_PARAM_NAME_LEN - 3 );
 			}
 
-			len = STRLEN(" = ");
-			memcpy( buf, _SC(" = "), sq_rsl(len) );
-			buf += len;
-
-			len = min( str.len, DISASM_MAX_PARAM_NAME_LEN - 3 );
 #ifdef SQUNICODE
-			UTF8ToSQUnicode( buf, _bs, str.ptr, str.len );
+			UTF8ToSQUnicode( buf, _bs, str.ptr, len );
 #else
 			memcpy( buf, str.ptr, sq_rsl(len) );
 #endif
@@ -18872,51 +19126,54 @@ void SQDebugServer::DebugHook( HSQUIRRELVM vm, int type,
 		{
 			if ( m_pCurVM->_suspended )
 			{
-				SQInstruction *pip = m_pCurVM->ci->_ip - 1;
-
-				if ( pip->op == _OP_CALL )
+				if ( m_pCurVM->ci->_ip )
 				{
-					const SQObjectPtr &val = m_pCurVM->_stack._vals[ m_pCurVM->_stackbase + pip->_arg1 ];
-					if ( sq_type(val) == OT_NATIVECLOSURE &&
-							sq_type(_nativeclosure(val)->_name) == OT_STRING &&
-							IsEqual( _SC("suspend"), _string(_nativeclosure(val)->_name) ) )
+					SQInstruction *pip = m_pCurVM->ci->_ip - 1;
+
+					if ( pip->op == _OP_CALL )
 					{
-						m_nCalls -= (int)( m_pCurVM->ci - m_pCurVM->_callsstack ) + 1;
-
-						switch ( m_State )
+						const SQObjectPtr &val = m_pCurVM->_stack._vals[ m_pCurVM->_stackbase + pip->_arg1 ];
+						if ( sq_type(val) == OT_NATIVECLOSURE &&
+								sq_type(_nativeclosure(val)->_name) == OT_STRING &&
+								IsEqual( _SC("suspend"), _string(_nativeclosure(val)->_name) ) )
 						{
-							case ThreadState_StepOut:
+							m_nCalls -= (int)( m_pCurVM->ci - m_pCurVM->_callsstack + 1 );
 
-								if ( m_pStateVM != m_pCurVM )
+							switch ( m_State )
+							{
+								case ThreadState_StepOut:
+
+									if ( m_pStateVM != m_pCurVM )
+										break;
+
+								case ThreadState_StepOver:
+
+									m_State = ThreadState_StepIn;
 									break;
 
-							case ThreadState_StepOver:
+								case ThreadState_StepOutInstruction:
 
-								m_State = ThreadState_StepIn;
-								break;
+									if ( m_pStateVM != m_pCurVM )
+										break;
 
-							case ThreadState_StepOutInstruction:
+								case ThreadState_StepOverInstruction:
+								case ThreadState_StepInInstruction:
 
-								if ( m_pStateVM != m_pCurVM )
+									RestoreCachedInstructions();
+									ClearCachedInstructions();
+
+									if ( InstructionStep( vm, ci, 2 ) )
+									{
+										m_State = ThreadState_StepInInstruction;
+									}
+									else
+									{
+										m_State = ThreadState_NextStatement;
+									}
+
+								default:
 									break;
-
-							case ThreadState_StepOverInstruction:
-							case ThreadState_StepInInstruction:
-
-								RestoreCachedInstructions();
-								ClearCachedInstructions();
-
-								if ( InstructionStep( vm, ci, 2 ) )
-								{
-									m_State = ThreadState_StepInInstruction;
-								}
-								else
-								{
-									m_State = ThreadState_NextStatement;
-								}
-
-							default:
-								break;
+							}
 						}
 					}
 				}
@@ -18928,7 +19185,7 @@ void SQDebugServer::DebugHook( HSQUIRRELVM vm, int type,
 						( IsEqual( _SC("wakeup"), _string(_nativeclosure(m_pCurVM->ci->_closure)->_name) ) ||
 						  IsEqual( _SC("call"), _string(_nativeclosure(m_pCurVM->ci->_closure)->_name) ) ) )
 				{
-					m_nCalls += (int)( vm->ci - vm->_callsstack ) + 1;
+					m_nCalls += (int)( vm->ci - vm->_callsstack + ( type != SQ_HOOK_CALL ) );
 				}
 			}
 		}
