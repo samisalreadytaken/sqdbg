@@ -306,7 +306,7 @@ public:
 
 	void Free( void *ptr )
 	{
-		Assert( !SEQUENTIAL );
+		STATIC_ASSERT( !SEQUENTIAL );
 		Assert( m_Memory );
 		Assert( ptr );
 
@@ -364,7 +364,7 @@ public:
 
 	void ReleaseShrink()
 	{
-		Assert( SEQUENTIAL );
+		STATIC_ASSERT( SEQUENTIAL );
 
 		if ( !m_Memory )
 			return;
@@ -412,7 +412,7 @@ public:
 
 	void Release()
 	{
-		Assert( SEQUENTIAL );
+		STATIC_ASSERT( SEQUENTIAL );
 
 		if ( !m_Memory || ( !m.LastFreeChunk() && !m.LastFreeIndex() ) )
 			return;
@@ -437,7 +437,7 @@ public:
 
 	void ReleaseTop()
 	{
-		Assert( SEQUENTIAL );
+		STATIC_ASSERT( SEQUENTIAL );
 
 		m.SetLastFreeChunk( m.PrevChunk() );
 		m.SetLastFreeIndex( m.PrevIndex() );
@@ -455,23 +455,23 @@ public:
 
 	vector() : base(), size(0)
 	{
-		Assert( !bExternalMem );
+		STATIC_ASSERT( !bExternalMem );
 	}
 
 	vector( CAllocator &a ) : base(a), size(0)
 	{
-		Assert( bExternalMem );
+		STATIC_ASSERT( bExternalMem );
 	}
 
 	vector( I count ) : base(), size(0)
 	{
-		Assert( !bExternalMem );
+		STATIC_ASSERT( !bExternalMem );
 		base.Alloc( count * sizeof(T) );
 	}
 
 	vector( const vector< T > &src ) : base()
 	{
-		Assert( !bExternalMem );
+		STATIC_ASSERT( !bExternalMem );
 		base.Alloc( src.base.Size() );
 		size = src.size;
 
