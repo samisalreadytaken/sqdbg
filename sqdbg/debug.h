@@ -104,6 +104,7 @@
 			} while(0)
 	#endif
 	#define Verify( x ) Assert(x)
+	#define STATIC_ASSERT( x ) static_assert( x, #x )
 #else
 	#define DebuggerBreak() ((void)0)
 	#define Assert( x ) ((void)0)
@@ -111,6 +112,7 @@
 	#define AssertMsg1( x, msg, a1 ) ((void)0)
 	#define AssertMsg2( x, msg, a1, a2 ) ((void)0)
 	#define Verify( x ) x
+	#define STATIC_ASSERT( x )
 #endif // _DEBUG
 
 #ifdef _WIN32
