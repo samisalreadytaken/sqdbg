@@ -842,7 +842,7 @@ public:
 		m_pRecvBufPtr( m_pRecvBuf ),
 		m_bWSAInit( false )
 	{
-		Assert( sizeof(m_pRecvBuf) <= ( 1 << ( sizeof(CMessagePool::message_t::len) * 8 ) ) );
+		STATIC_ASSERT( sizeof(m_pRecvBuf) <= ( 1 << ( sizeof(CMessagePool::message_t::len) * 8 ) ) );
 	}
 };
 

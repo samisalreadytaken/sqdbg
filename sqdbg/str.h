@@ -75,6 +75,21 @@ bool atox( string_t str, I *out );
 template < typename I >
 bool atoo( string_t str, I *out );
 
+template < typename I >
+struct _as_unsigned { typedef I T; };
+
+template <>
+struct _as_unsigned< int > { typedef unsigned int T; };
+
+#ifdef _SQ64
+template <>
+struct _as_unsigned< SQInteger > { typedef SQUnsignedInteger T; };
+#endif
+
+#define as_unsigned_type( I ) typename _as_unsigned<I>::T
+#define cast_unsigned( I, v ) (as_unsigned_type(I)(v))
+#define IS_UNSIGNED( I ) ((I)0 < (I)-1)
+
 
 #define _isdigit( c ) \
 	IN_RANGE_CHAR( c, '0', '9' )
@@ -403,9 +418,10 @@ struct sqstring_t
 			unsigned int i = 0;
 			do
 			{
-				if ( ptr[i] > 0x7E || other.ptr[i] != (char)ptr[i] )
+				if ( (SQUnsignedChar)ptr[i] > 0x7E || other.ptr[i] != (char)ptr[i] )
 				{
-					AssertMsg( ptr[i] <= 0x7E, "not implemented" );
+					// > 0x7E can be reached through completions request
+					// unicode identifiers are not supported, ignore them
 					return false;
 				}
 			}
@@ -556,6 +572,8 @@ struct stringbufbase_t
 	template < typename I >
 	void PutHex( I value, bool padding = true )
 	{
+		STATIC_ASSERT( IS_UNSIGNED( I ) );
+
 		int space = BytesLeft();
 
 		if ( space < 3 )
@@ -590,9 +608,9 @@ bool string_t::IsEqualTo( const sqstring_t &other ) const
 		{
 			// Used for comparing against locals and outers,
 			// implement unicode conversion if locals can have unicode characters
-			if ( other.ptr[i] > 0x7E || (char)other.ptr[i] != ptr[i] )
+			if ( (SQUnsignedChar)other.ptr[i] > 0x7E || (char)other.ptr[i] != ptr[i] )
 			{
-				AssertMsg( other.ptr[i] <= 0x7E, "not implemented" );
+				AssertMsg( (SQUnsignedChar)other.ptr[i] <= 0x7E, "not implemented" );
 				return false;
 			}
 		}
@@ -685,8 +703,9 @@ inline int printhex( C *buf, int size, I value )
 {
 	Assert( buf );
 	Assert( size > 0 );
+	STATIC_ASSERT( IS_UNSIGNED( as_unsigned_type( I ) ) );
 
-	int len = ( prefix ? 2 : 0 ) + ( padding ? sizeof(I) * 2 : countdigits<16>( value ) );
+	int len = ( prefix ? 2 : 0 ) + ( padding ? sizeof(I) * 2 : countdigits<16>( cast_unsigned( I, value ) ) );
 
 	if ( len > size )
 		len = size;
@@ -695,7 +714,7 @@ inline int printhex( C *buf, int size, I value )
 
 	do
 	{
-		C c = value & 0xf;
+		C c = cast_unsigned( I, value ) & 0xf;
 		value >>= 4;
 		buf[i--] = c + ( ( c < 10 ) ? '0' : ( ( uppercase ? 'A' : 'a' ) - 10 ) );
 	}
@@ -727,6 +746,7 @@ inline int printoct( C *buf, int size, I value )
 {
 	Assert( buf );
 	Assert( size > 0 );
+	STATIC_ASSERT( IS_UNSIGNED( I ) );
 
 	int len = countdigits<8>( value ) + 1;
 
@@ -1302,7 +1322,7 @@ doescape:
 						else
 						{
 							mbc[bytes++] = 'x';
-							bytes += printhex< true, false >( mbc + bytes, sizeof(mbc) - bytes, (SQChar)cp );
+							bytes += printhex< true, false >( mbc + bytes, sizeof(mbc) - bytes, (SQUnsignedChar)cp );
 						}
 
 						goto write;
@@ -1339,7 +1359,7 @@ x7ff:
 
 					mbc[bytes++] = '\\';
 					mbc[bytes++] = 'x';
-					bytes = bytes + printhex< true, false >( mbc + bytes, sizeof(mbc) - bytes, (SQChar)cp );
+					bytes = bytes + printhex< true, false >( mbc + bytes, sizeof(mbc) - bytes, (SQUnsignedChar)cp );
 					goto write;
 				}
 			}
