@@ -5,7 +5,7 @@
 // Squirrel Debugger
 //
 
-#define SQDBG_SV_VER 6
+#define SQDBG_SV_VER 7
 
 #include "sqdbg.h"
 
@@ -845,13 +845,16 @@ public:
 		}
 		else
 		{
-			for ( hnode_t i = 0; i < m_Nodes.Size(); i++ )
+			for ( hnode_t i = 0; i < m_NodeTags.Size(); i++ )
 			{
-				node_t &node = m_Nodes[i];
-				node.calls = 0;
-				node.samples = 0.0;
-				node.sampleStart = 0.0;
+				nodetag_t *node = &m_NodeTags[i];
+				__ObjRelease( node->funcsrc );
+				__ObjRelease( node->funcname );
 			}
+
+			m_Nodes.Clear();
+			m_NodeTags.Clear();
+			m_CallStack.Clear();
 
 			for ( int i = 0; i < vm->_callsstacksize; i++ )
 			{
@@ -928,9 +931,9 @@ public:
 		{
 			m_State = kProfPaused;
 
-			if ( m_CallStack.Size() )
+			for ( unsigned int i = 0; i < m_CallStack.Size(); i++ )
 			{
-				hnode_t caller = m_CallStack.Top();
+				hnode_t caller = m_CallStack[i];
 				node_t *node = &m_Nodes[caller];
 				node->samples += sample - node->sampleStart;
 #ifdef _DEBUG
@@ -938,9 +941,9 @@ public:
 #endif
 			}
 
-			if ( m_GroupStack.Size() )
+			for ( unsigned int i = 0; i < m_GroupStack.Size(); i++ )
 			{
-				hgroup_t idx = m_GroupStack.Top();
+				hgroup_t idx = m_GroupStack[i];
 				group_t *group = &m_Groups[idx];
 				sample_t dt = sample - group->sampleStart;
 				group->samples += dt;
@@ -967,16 +970,16 @@ public:
 
 			sample_t sample = Sample();
 
-			if ( m_CallStack.Size() )
+			for ( unsigned int i = 0; i < m_CallStack.Size(); i++ )
 			{
-				hnode_t caller = m_CallStack.Top();
+				hnode_t caller = m_CallStack[i];
 				node_t *node = &m_Nodes[caller];
 				node->sampleStart = sample;
 			}
 
-			if ( m_GroupStack.Size() )
+			for ( unsigned int i = 0; i < m_GroupStack.Size(); i++ )
 			{
-				hgroup_t idx = m_GroupStack.Top();
+				hgroup_t idx = m_GroupStack[i];
 				group_t *group = &m_Groups[idx];
 				group->sampleStart = sample;
 			}
@@ -985,7 +988,7 @@ public:
 
 	void CallBegin( SQFunctionProto *func )
 	{
-		Assert( IsActive() );
+		Assert( IsActive() || m_State == kProfPaused );
 
 		hnode_t caller = m_CallStack.Size() ? m_CallStack.Top() : INVALID_HANDLE;
 
@@ -1287,6 +1290,10 @@ public:
 			return (int)( buf - bufstart );
 		}
 
+		sample_t sample = ( m_CallStack.Size() && m_State != kProfPaused ) ?
+			Sample() :
+			0.0;
+
 		vector< node_t > nodes( m_Nodes );
 
 		switch ( type )
@@ -1348,17 +1355,13 @@ public:
 				{
 					totalSamples += node.samples;
 				}
-				// Within the call frame, accumulate children for a rough estimate
-				// This will miss any time spent in the body
-				// of the function excluding subcalls
+				// Within the call frame, take current time
 				else
 				{
-					for ( hnode_t j = i; j < nodecount; j++ )
-					{
-						const node_t &nj = nodes[j];
-						if ( nj.caller == node.id )
-							totalSamples += nj.samples;
-					}
+					totalSamples += node.samples;
+
+					if ( m_State != kProfPaused )
+						totalSamples += sample - node.sampleStart;
 				}
 			}
 		}
@@ -1603,7 +1606,7 @@ private:
 		{
 			if ( us > 0.0 )
 			{
-				int len = scsprintf( buf, size, _SC("%6.2f ns"), us * 1.e3 );
+				int len = scsprintf( buf, size, _SC("%6.2f ns"), min( us * 1.e3, 999.99 ) );
 				buf += len;
 				size -= len;
 			}
@@ -2095,6 +2098,7 @@ struct objref_t
 		DELEGABLE_META,
 		CUSTOMMEMBER,
 		STACK,
+		OUTER,
 #ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
 		FUNCPROTO,
 #endif
@@ -7924,6 +7928,18 @@ bool SQDebugServer::Get( const objref_t &obj, SQObjectPtr &value )
 
 			return false;
 		}
+		case objref_t::OUTER:
+		{
+			if ( sq_type(obj.src) == OT_CLOSURE &&
+					_integer(obj.key) >= 0 &&
+					_integer(obj.key) < _fp(_closure(obj.src)->_function)->_noutervalues )
+			{
+				value = *_outervalptr( _closure(obj.src)->_outervalues[ _integer(obj.key) ] );
+				return true;
+			}
+
+			return false;
+		}
 #ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
 		case objref_t::FUNCPROTO:
 		{
@@ -8114,6 +8130,18 @@ bool SQDebugServer::Set( const objref_t &obj, const SQObjectPtr &value )
 					vm->_stack._vals[ obj.stack.index ] = value;
 					return true;
 				}
+			}
+
+			return false;
+		}
+		case objref_t::OUTER:
+		{
+			if ( sq_type(obj.src) == OT_CLOSURE &&
+					_integer(obj.key) >= 0 &&
+					_integer(obj.key) < _fp(_closure(obj.src)->_function)->_noutervalues )
+			{
+				*_outervalptr( _closure(obj.src)->_outervalues[ _integer(obj.key) ] ) = value;
+				return true;
 			}
 
 			return false;
@@ -12108,7 +12136,6 @@ bool SQDebugServer::ArithOp( char op, const SQObjectPtr &lhs, const SQObjectPtr 
 
 void SQDebugServer::ConvertPtr( objref_t &obj )
 {
-	// doesn't convert outer vars
 	if ( obj.type & ~objref_t::PTR )
 		obj.type = (objref_t::EOBJREF)( obj.type & ~objref_t::PTR );
 }
@@ -12512,8 +12539,10 @@ bool SQDebugServer::GetObj_Frame( HSQUIRRELVM vm, const SQVM::CallInfo *ci, cons
 			const SQOuterVar &var = func->_outervalues[i];
 			if ( expression.IsEqualTo( _string(var._name) ) )
 			{
-				out.type = objref_t::PTR;
+				out.type = (objref_t::EOBJREF)( objref_t::PTR | objref_t::OUTER );
 				out.ptr = _outervalptr( pClosure->_outervalues[i] );
+				out.src = pClosure;
+				out.key = (SQInteger)i;
 				value = *out.ptr;
 				return true;
 			}
@@ -20029,7 +20058,6 @@ SQInteger SQDebugServer::SQProfReset( HSQUIRRELVM vm )
 				tag = _string(arg1);
 				break;
 			default:
-				Assert(!"UNREACHABLE");
 				break;
 		}
 
@@ -20540,7 +20568,7 @@ void sqdbg_get_debugger_ref( HSQUIRRELVM vm, SQObjectPtr &ref )
 
 #ifdef DEBUG_HOOK_CACHED_SQDBG
 // Cache the debugger in an unused variable in the VM
-// for at least 20% faster access on debug hook
+// for faster access on debug hook
 // compared to registry table access
 void sqdbg_set_debugger_cached_debughook( HSQUIRRELVM vm, bool state )
 {
