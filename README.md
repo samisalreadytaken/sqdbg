@@ -141,18 +141,24 @@ Specifier  | Format       | Example value             | Result
 `g`        | flt./sci.    | 1250000.0                 | 1.25e+06
 `na`       | no address   | 0x010C5F20 {x = 0, y = 1} | x = 0, y = 1
 `l`        | list members | 0x010C5F20 {size=4}       | 0x010C5F20 [26500, 29358, 15724, 26962]
-`lna`      | list members | 0x010C5F20 {size=4}       | [26500, 29358, 15724, 26962]
-`lnax`     | list members | 0x010C5F20 {size=4}       | [0x6784, 0x72ae, 0x3d6c, 0x6952]
+`lna`      | list members, no address              | 0x010C5F20 {size=4}       | [26500, 29358, 15724, 26962]
+`lnax`     | list members, no address, hexadecimal | 0x010C5F20 {size=4}       | [0x6784, 0x72ae, 0x3d6c, 0x6952]
 
 ### Watch scope locks
 
 Flagging a watch expression 'locked' (`*` after a comma) will maintain the scope and executing thread of the expression at the time of its successful evaluation. Stepping preserves this lock while continuing execution clears it.
 
-### Extended watch expressions
+### Extended syntax
 
-Binary literals are usable within watch expressions.
+Available in watch and tracepoint expressions and `sqdbg_eval` script function.
 
-`0451 & ~0b1010,b : 0b0000000100100001`
+Virtual members and user defined custom class members can be accessed.
+
+```
+local arr = [];
+local refs = sqdbg_eval("arr.$refs");     // 1
+local str = sqdbg_eval("refs <<= 4,x");   // "0x10"
+```
 
 Reference counted Squirrel objects can be tracked by their addresses with the `*` operator.
 
@@ -167,7 +173,7 @@ arr == *0x010C5F20       : (bool)    : true
 (*0x010C5F20).$size      : (integer) : 2
 ```
 
-Available special keywords: `$function`, `$caller`, `$stack`
+Available special watch expression keywords: `$function`, `$caller`, `$stack`
 
 ### Function breakpoints
 

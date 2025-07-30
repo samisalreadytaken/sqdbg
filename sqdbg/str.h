@@ -83,7 +83,7 @@ struct _as_unsigned< int > { typedef unsigned int T; };
 
 #ifdef _SQ64
 template <>
-struct _as_unsigned< SQInteger > { typedef SQUnsignedInteger T; };
+struct _as_unsigned< int64_t > { typedef uint64_t T; };
 #endif
 
 #define as_unsigned_type( I ) typename _as_unsigned<I>::T

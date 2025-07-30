@@ -275,7 +275,12 @@ static inline void PutStr( CBuffer *buffer, const string_t &str )
 #ifdef SQDBG_VALIDATE_SENT_MSG
 	for ( unsigned int i = 0; i < str.len; i++ )
 	{
-		if ( str.ptr[i] == '\\' && ( str.ptr[i+1] == '\\' || str.ptr[i+1] == '\"' ) )
+		if ( str.ptr[i] == '\\' &&
+				( str.ptr[i+1] == '\\' ||
+				  str.ptr[i+1] == '\"' ||
+				  str.ptr[i+1] == 'n' ||
+				  str.ptr[i+1] == 'r' ||
+				  str.ptr[i+1] == 't' ) )
 		{
 			i++;
 			continue;
