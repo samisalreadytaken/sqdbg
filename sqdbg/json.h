@@ -319,7 +319,7 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 			default:
 				if ( !IN_RANGE_CHAR( *c, 0x20, 0x7E ) )
 				{
-					int ret = IsValidUTF8( (unsigned char*)c, i + 1 );
+					int ret = IsValidUTF8( c, i + 1 );
 					if ( ret != 0 )
 					{
 						i -= ret - 1;
@@ -415,7 +415,7 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 			default:
 				if ( !IN_RANGE_CHAR( *c, 0x20, 0x7E ) )
 				{
-					int ret = IsValidUTF8( (unsigned char*)c, i + 1 );
+					int ret = IsValidUTF8( c, i + 1 );
 					if ( ret != 0 )
 					{
 						memcpy( mem + idx, c + 1, ret - 1 );
@@ -430,19 +430,26 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 						if ( !quote )
 						{
 							mem[idx++] = 'u';
+							uint16_t val = (uint16_t)*(unsigned char*)c;
 							idx += printhex< true, false >(
 									mem + idx,
 									buffer->Capacity() - idx,
-									(uint16_t)*(unsigned char*)c );
+									val );
 						}
 						else
 						{
 							mem[idx++] = '\\';
+#ifdef SQUNICODE
+							mem[idx++] = 'u';
+							uint16_t val = (uint16_t)*(unsigned char*)c;
+#else
 							mem[idx++] = 'x';
+							unsigned char val = *(unsigned char*)c;
+#endif
 							idx += printhex< true, false >(
 									mem + idx,
 									buffer->Capacity() - idx,
-									(SQUnsignedChar)*(unsigned char*)c );
+									val );
 						}
 					}
 				}
@@ -709,7 +716,7 @@ public:
 		}
 		else
 		{
-			PutHex< false >( m_pBuffer, cast_unsigned( I, val ) );
+			PutHex< false >( m_pBuffer, cast_unsigned( val ) );
 		}
 		PutChar( m_pBuffer, ']' );
 		PutChar( m_pBuffer, '\"' );
@@ -1227,7 +1234,7 @@ err_eof:
 
 			json_field_t *kv = pTable->NewElement();
 
-			Assert( token.ptr - m_start < (ostr_t::index_t)-1 );
+			Assert( (ostr_t::index_t)( token.ptr - m_start ) < (ostr_t::index_t)-1 );
 			kv->key.ofs = token.ptr - m_start;
 			kv->key.len = (ostr_t::index_t)token.len;
 
@@ -1320,7 +1327,7 @@ err_eof:
 				return type;
 			case Token_String:
 				value->type = JSON_STRING;
-				Assert( token.ptr - m_start < (ostr_t::index_t)-1 );
+				Assert( (ostr_t::index_t)( token.ptr - m_start ) < (ostr_t::index_t)-1 );
 				value->_string.ofs = token.ptr - m_start;
 				value->_string.len = (ostr_t::index_t)token.len;
 				return type;

@@ -5,7 +5,7 @@
 // Squirrel Debugger
 //
 
-#define SQDBG_SV_VER 8
+#define SQDBG_SV_VER 9
 
 #include "sqdbg.h"
 
@@ -24,6 +24,8 @@
 
 #define ___CAT(a, b) a##b
 #define __CAT(a, b) ___CAT(a,b)
+#define ___MKSTR(x) #x
+#define __MKSTR(x) ___MKSTR(x)
 
 #define STR_NOMEM "**OUT OF MEMORY**"
 #define AssertOOM( p, size ) AssertMsg1( (p), "**OUT OF MEMORY** (%u)", (unsigned int)(size) )
@@ -79,6 +81,16 @@ void sqdbg_sleep( int ms )
 }
 #endif
 
+#if defined(_MSC_VER)
+	#if !defined(RTTI_ENABLED)
+		#define SQDBG_NO_RTTI
+	#endif
+#elif defined(__GNUC__)
+	#if !defined(__GXX_RTTI)
+		#define SQDBG_NO_RTTI
+	#endif
+#endif
+
 #if defined(SQDBG_DEBUGGER_ECHO_OUTPUT) && defined(_WIN32)
 	#ifdef SQUNICODE
 		#define _OutputDebugString(s) OutputDebugStringW(s)
@@ -121,7 +133,7 @@ void sqdbg_sleep( int ms )
 #define ALIGN(v, a) (((v) + ((a)-1)) & ~((a)-1))
 #define ROUND(v, a) ((v) + (a) - (v) % (a))
 
-#ifndef _WIN32
+#ifndef _MSC_VER
 #undef offsetof
 #define offsetof(a,b) ((size_t)(&(((a*)0)->b)))
 #endif
@@ -151,13 +163,23 @@ void sqdbg_sleep( int ms )
 		#ifndef WCHAR_SIZE
 			#define WCHAR_SIZE 4
 		#endif
-		typedef uint32_t SQUnsignedChar;
+		typedef unsigned int SQUnsignedChar;
 	#endif
+
+	STATIC_ASSERT( sizeof(SQChar) == WCHAR_SIZE );
 #else
 	typedef unsigned char SQUnsignedChar;
 #endif
 
 STATIC_ASSERT( sizeof(SQChar) == sizeof(SQUnsignedChar) );
+
+#ifdef SQUSEDOUBLE
+typedef uint64_t SQFloat_Int;
+#else
+typedef unsigned int SQFloat_Int;
+#endif
+
+STATIC_ASSERT( sizeof(SQFloat) == sizeof(SQFloat_Int) );
 
 #ifndef scstrlen
 #ifdef SQUNICODE
@@ -228,6 +250,7 @@ STATIC_ASSERT( sizeof(SQChar) == sizeof(SQUnsignedChar) );
 	#define _fp(func) (func)
 	#define _outervalptr(outervar) (_outer((outervar))->_valptr)
 	#define _nativenoutervalues(p) (p)->_noutervalues
+	#define _userdatavalptr(ud) sq_aligning( (ud) + 1 )
 	#define NATIVE_DEBUG_HOOK
 
 	#ifdef NATIVE_DEBUG_HOOK
@@ -251,6 +274,7 @@ STATIC_ASSERT( sizeof(SQChar) == sizeof(SQUnsignedChar) );
 	#define _fp(func) _funcproto(func)
 	#define _outervalptr(outervar) (&(outervar))
 	#define _nativenoutervalues(p) (p)->_outervalues.size()
+	#define _userdatavalptr(ud) (ud->_val)
 	typedef SQFUNCTION _SQDEBUGHOOK;
 
 	#if SQUIRREL_VERSION_NUMBER >= 212
@@ -284,12 +308,22 @@ STATIC_ASSERT( sizeof(SQChar) == sizeof(SQUnsignedChar) );
 	#define is_delegable(t) (sq_type(t) & SQOBJECT_DELEGABLE)
 #endif
 
+#if SQUIRREL_VERSION_NUMBER < 310 && defined(NO_GARBAGE_COLLECTOR)
+	#define SS_NOGC(...) __VA_ARGS__
+#else
+	#define SS_NOGC(...)
+#endif
+
 #if !defined(SQDBG_DISABLE_COMPILER) && !defined(NO_GARBAGE_COLLECTOR)
 	#define SUPPORTS_DEREF_OP
 
 	#if SQUIRREL_VERSION_NUMBER >= 300
 		#define ACCESSIBLE_FUNCPROTO
 	#endif
+#endif
+
+#if defined(SUPPORTS_DEREF_OP) && SQUIRREL_VERSION_NUMBER < 300 && defined(SQDBG_NO_RTTI)
+	#undef SUPPORTS_DEREF_OP
 #endif
 
 #if defined(SQDBG_SUPPORTS_FUNCPROTO_LIST) && !defined(ACCESSIBLE_FUNCPROTO)
@@ -304,21 +338,21 @@ STATIC_ASSERT( sizeof(SQChar) == sizeof(SQUnsignedChar) );
 	#define SQDBG_DISABLE_EVAL_FUNC
 #endif
 
-#include "str.h"
-#include "json.h"
-#include "protocol.h"
-
 #define SQ_FOREACH_OP( obj, key, val ) \
 	int __CAT(_jump, __LINE__); \
 	for ( SQObjectPtr _pos; \
 			m_pCurVM->FOREACH_OP( obj, key, val, _pos, 0, 666, __CAT(_jump, __LINE__) ) && \
 			__CAT(_jump, __LINE__) != 666; ) \
 
-#define FOREACH_SQTABLE( pTable, key, val )\
+#define FOREACH_SQTABLE( pTable, key, val ) \
 	SQInteger __CAT(_i, __LINE__) = 0; \
 	for ( SQObjectPtr _pi = __CAT(_i, __LINE__); \
 			(__CAT(_i, __LINE__) = pTable->Next( false, _pi, key, val )) != -1; \
 			_pi._unVal.nInteger = __CAT(_i, __LINE__) )
+
+#include "str.h"
+#include "json.h"
+#include "protocol.h"
 
 #ifndef SQDBG_EXCLUDE_DEFAULT_MEMFUNCTIONS
 inline void *sqdbg_malloc( unsigned int size )
@@ -532,7 +566,7 @@ inline SQString *CreateSQString( SQSharedState *ss, const sqstring_t &str )
 	return SQString::Create( ss, str.ptr, str.len );
 }
 
-inline bool SQTable_Get( SQTable *table, const sqstring_t &key, SQObjectPtr &val )
+inline bool SQTable_Get( SS_NOGC(SQSharedState *ss,) SQTable *table, const sqstring_t &key, SQObjectPtr &val )
 {
 #if SQUIRREL_VERSION_NUMBER >= 310
 	#ifdef SQUNICODE
@@ -555,7 +589,11 @@ inline bool SQTable_Get( SQTable *table, const sqstring_t &key, SQObjectPtr &val
 		return r;
 	#endif
 #else
-	SQObjectPtr str = SQString::Create( table->_sharedstate, key.ptr, key.len );
+	#ifdef NO_GARBAGE_COLLECTOR
+		SQObjectPtr str = SQString::Create( ss, key.ptr, key.len );
+	#else
+		SQObjectPtr str = SQString::Create( table->_sharedstate, key.ptr, key.len );
+	#endif
 	return table->Get( str, val );
 #endif
 }
@@ -596,6 +634,8 @@ inline void SetBool( SQObjectPtr &obj, int state )
 
 inline bool IsEqual( const SQObject &o1, const SQObject &o2 )
 {
+	// NOTE: Without type and size checking, _rawval equality can return false
+	// on 32-bit double builds
 	return ( _rawval(o1) == _rawval(o2) && sq_type(o1) == sq_type(o2) );
 }
 
@@ -736,6 +776,11 @@ private:
 	vector< hgroup_t > m_GroupStack;
 #ifndef SQDBG_DISABLE_PROFILER_AUTO
 	vector< nodetag_t > m_NodeTags;
+#endif
+
+#ifdef NO_GARBAGE_COLLECTOR
+public:
+	SQSharedState *m_ss;
 #endif
 
 private:
@@ -1060,6 +1105,9 @@ public:
 		node->calls = 1;
 		node->samples = 0.0;
 
+#ifdef NO_GARBAGE_COLLECTOR
+		SQSharedState *ss = m_ss;
+#else
 #if SQUIRREL_VERSION_NUMBER >= 300
 		SQSharedState *ss = func->_sharedstate;
 #else
@@ -1070,6 +1118,8 @@ public:
 		Assert( funcsrc );
 		SQSharedState *ss = funcsrc->_sharedstate;
 #endif
+#endif
+		Assert( ss );
 
 		if ( funcname )
 		{
@@ -1077,7 +1127,7 @@ public:
 		}
 		else
 		{
-			SQChar *tmp = ss->GetScratchPad( sq_rsl(FMT_PTR_LEN + 1) );
+			SQChar tmp[ FMT_PTR_LEN + 1 ];
 			int len = printhex( tmp, FMT_PTR_LEN, (uintptr_t)func );
 			tmp[len] = 0;
 			tag->funcname = SQString::Create( ss, tmp, FMT_PTR_LEN );
@@ -2058,43 +2108,37 @@ struct breakpoint_t
 
 typedef enum
 {
-	VARREF_OBJ = 0,
-	VARREF_SCOPE_LOCALS,
-	VARREF_SCOPE_OUTERS,
-	VARREF_STACK,
-	VARREF_INSTRUCTIONS,
-	VARREF_OUTERS,
-	VARREF_LITERALS,
+	_VARREF_TYPE_SCOPE_FIRST = 0,
+		VARREF_SCOPE_LOCALS = _VARREF_TYPE_SCOPE_FIRST,
+		VARREF_SCOPE_OUTERS,
+		VARREF_STACK,
+	_VARREF_TYPE_SCOPE_LAST = VARREF_STACK,
+	_VARREF_TYPE_OBJECT_FIRST,
+		VARREF_OBJ = _VARREF_TYPE_OBJECT_FIRST,
+		VARREF_INSTRUCTIONS,
+		VARREF_OUTERS,
+		VARREF_LITERALS,
 #ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
-	VARREF_FUNCTIONS,
+		VARREF_FUNCTIONS,
 #endif
-	VARREF_METAMETHODS,
-	VARREF_ATTRIBUTES,
-	VARREF_CALLSTACK,
+		VARREF_METAMETHODS,
+		VARREF_ATTRIBUTES,
+		VARREF_CALLSTACK,
+	_VARREF_TYPE_OBJECT_LAST = VARREF_CALLSTACK,
+	VARREF_BREAKPOINT,
 	VARREF_MAX
 } EVARREF;
 
 inline bool IsScopeRef( EVARREF type )
 {
 	Assert( type >= 0 && type < VARREF_MAX );
-	return ( type == VARREF_SCOPE_LOCALS ||
-			type == VARREF_SCOPE_OUTERS ||
-			type == VARREF_STACK );
+	return ( type >= _VARREF_TYPE_SCOPE_FIRST && type <= _VARREF_TYPE_SCOPE_LAST );
 }
 
 inline bool IsObjectRef( EVARREF type )
 {
 	Assert( type >= 0 && type < VARREF_MAX );
-	return ( type == VARREF_OBJ ||
-			type == VARREF_INSTRUCTIONS ||
-			type == VARREF_OUTERS ||
-			type == VARREF_LITERALS ||
-#ifdef SQDBG_SUPPORTS_FUNCPROTO_LIST
-			type == VARREF_FUNCTIONS ||
-#endif
-			type == VARREF_METAMETHODS ||
-			type == VARREF_ATTRIBUTES ||
-			type == VARREF_CALLSTACK );
+	return ( type >= _VARREF_TYPE_OBJECT_FIRST && type <= _VARREF_TYPE_OBJECT_LAST );
 }
 
 struct varref_t
@@ -2370,10 +2414,12 @@ private:
 	HSQUIRRELVM m_pStateVM;
 	HSQUIRRELVM m_pPausedThread;
 
+public:
 	SQPRINTFUNCTION m_Print;
 	SQPRINTFUNCTION m_PrintError;
 	SQObjectPtr m_ErrorHandler;
 
+private:
 #ifndef SQDBG_DISABLE_PROFILER
 	CProfiler *m_pProfiler;
 	vector< threadprofiler_t > m_Profilers;
@@ -2590,6 +2636,7 @@ private:
 #ifdef SQDBG_SUPPORTS_SET_INSTRUCTION
 	void OnRequest_SetVariable_Instruction( const varref_t *ref, string_t &strName, string_t &strValue, int seq );
 #endif
+	void OnRequest_SetVariable_Breakpoint( /*const varref_t *ref,*/ string_t &strName, string_t &strValue, int seq );
 	void OnRequest_SetExpression( const json_table_t &arguments, int seq );
 	void OnRequest_Disassemble( const json_table_t &arguments, int seq );
 #ifdef SUPPORTS_RESTART_FRAME
@@ -2894,6 +2941,7 @@ private:
 	inline void RemoveThreads();
 
 private:
+	int ToVarRef( EVARREF type/*, int data*/ );
 	int ToVarRef( EVARREF type, HSQUIRRELVM vm, int frame );
 	int ToVarRef( EVARREF type, const SQObject &obj, bool isStrong = false );
 	int ToVarRef( const SQObject &obj, bool isStrong = false )
@@ -2963,17 +3011,18 @@ public:
 	void ProfPrint( HSQUIRRELVM vm, SQString *tag, int type );
 #endif
 
-private:
-	inline void StepOutInstruction( HSQUIRRELVM vm, SQVM::CallInfo *ci );
+public:
+	void DumpBreakpoints( wjson_array_t &variables );
+	void DumpStack( HSQUIRRELVM vm, int frame, int flags, wjson_array_t &variables );
 
+private:
 	void ErrorHandler( HSQUIRRELVM vm );
+	inline void StepOutInstruction( HSQUIRRELVM vm, SQVM::CallInfo *ci );
 	void DebugHook( HSQUIRRELVM vm, int type,
 			const SQChar *sourcename, int line, const SQChar *funcname );
 #ifndef SQDBG_DISABLE_PROFILER_AUTO
 	void ProfHook( HSQUIRRELVM vm, int type );
 #endif
-	void OnSQPrint( HSQUIRRELVM vm, const SQChar *buf, int len );
-	void OnSQError( HSQUIRRELVM vm, const SQChar *buf, int len );
 
 	template < typename T >
 	void SendEvent_OutputStdOut( const T &strOutput, const SQVM::CallInfo *ci );
@@ -3000,11 +3049,15 @@ public:
 	static SQInteger SQProfPrint( HSQUIRRELVM vm );
 #endif
 
+	static const SQVM::CallInfo *GetCurrentScriptSource( HSQUIRRELVM vm );
 	static void SQPrint( HSQUIRRELVM vm, const SQChar *fmt, ... );
 	static void SQError( HSQUIRRELVM vm, const SQChar *fmt, ... );
 
+	void SQPrintAtFrameV( SQPRINTFUNCTION fn,
+			HSQUIRRELVM vm, const SQVM::CallInfo *ci, const SQChar *fmt, va_list va );
+
 #ifndef SQDBG_CALL_DEFAULT_ERROR_HANDLER
-	static void SQErrorAtFrame( HSQUIRRELVM vm, const SQVM::CallInfo *ci, const SQChar *fmt, ... );
+	void SQErrorNoFrame( HSQUIRRELVM vm, const SQChar *fmt, ... );
 	void PrintVar( HSQUIRRELVM vm, const SQChar *name, const SQObjectPtr &obj );
 	void PrintStack( HSQUIRRELVM vm );
 #endif
@@ -3051,20 +3104,24 @@ inline bool SQTable_Get( SQDebugServer *dbg, SQTable *table, const string_t &key
 	SQChar *tmp = (SQChar*)dbg->ScratchPad( sq_rsl(len) );
 
 	if ( !tmp )
-		return NULL;
+		return false;
 
 	len = UTF8ToSQUnicode( tmp, sq_rsl(len), key.ptr, key.len );
 	tmp[len] = 0;
 
-#if SQUIRREL_VERSION_NUMBER >= 310
-	return table->GetStr( tmp, len, val );
-#else
-	SQObjectPtr str = SQString::Create( table->_sharedstate, tmp, len );
-	return table->Get( str, val );
-#endif
+	#if SQUIRREL_VERSION_NUMBER >= 310
+		return table->GetStr( tmp, len, val );
+	#else
+		SQObjectPtr str = SQString::Create( _ss(dbg->m_pRootVM), tmp, len );
+		return table->Get( str, val );
+	#endif
 #else
 	(void)dbg;
-	return SQTable_Get( table, key, val );
+	#if SQUIRREL_VERSION_NUMBER >= 310
+		return SQTable_Get( table, key, val );
+	#else
+		return SQTable_Get( SS_NOGC(_ss(dbg->m_pRootVM),) table, key, val );
+	#endif
 #endif
 }
 
@@ -3104,8 +3161,6 @@ void SQDebugServer::Attach( HSQUIRRELVM vm )
 
 	if ( sq_type(m_ErrorHandler) != OT_NULL )
 		sq_addref( m_pRootVM, &m_ErrorHandler );
-
-	sq_enabledebuginfo( m_pRootVM, 1 );
 
 	SQString *cached = CreateSQString( m_pRootVM, _SC("sqdbg") );
 	__ObjAddRef( cached );
@@ -3245,6 +3300,11 @@ void SQDebugServer::Attach( HSQUIRRELVM vm )
 
 		sq_poptop( m_pRootVM );
 	}
+
+#ifndef SQDBG_CALL_DEFAULT_ERROR_HANDLER
+	SetErrorHandler( true );
+#endif
+	sq_enabledebuginfo( m_pRootVM, 1 );
 
 	Print(_SC("(sqdbg) [%d] Attached\n"), SQDBG_SV_VER);
 }
@@ -3465,7 +3525,9 @@ void SQDebugServer::DisconnectClient()
 
 	m_Server.DisconnectClient();
 
+#ifdef SQDBG_CALL_DEFAULT_ERROR_HANDLER
 	SetErrorHandler( false );
+#endif
 #ifndef SQDBG_DISABLE_PROFILER_AUTO
 	SetDebugHook( IsProfilerEnabled() ? &SQProfHook : NULL );
 #else
@@ -3561,7 +3623,7 @@ void SQDebugServer::Frame()
 #define GET_OR_FAIL( _base, _val ) \
 	if ( !(_base).Get( #_val, &_val ) ) \
 	{ \
-		PrintError(_SC("(sqdbg) invalid DAP message, could not find '" #_val "'\n")); \
+		PrintError( _SC("(sqdbg) Invalid DAP message, could not find '" FMT_CSTR "'\n"), #_val ); \
 		DisconnectClient(); \
 		return; \
 	}
@@ -3569,7 +3631,7 @@ void SQDebugServer::Frame()
 #define GET_OR_ERROR_RESPONSE( _cmd, _base, _val ) \
 	if ( !(_base).Get( #_val, &_val ) ) \
 	{ \
-		PrintError(_SC("(sqdbg) invalid DAP message, could not find '" #_val "'\n")); \
+		PrintError( _SC("(sqdbg) Invalid DAP message, could not find '" FMT_CSTR "'\n"), #_val ); \
 		DAP_ERROR_RESPONSE( seq, _cmd ); \
 		DAP_ERROR_BODY( 0, "invalid DAP message" ); \
 		DAP_SEND(); \
@@ -5328,7 +5390,7 @@ static inline bool HasEscapes( const SQChar *src, SQInteger len )
 					int ret = IsValidUnicode( src, end - src );
 					if ( ret > 0 )
 #else
-					int ret = IsValidUTF8( (unsigned char*)src, end - src );
+					int ret = IsValidUTF8( src, end - src );
 					if ( ret != 0 )
 #endif
 					{
@@ -5364,7 +5426,7 @@ static inline int CountEscapes( const char *src, SQInteger len )
 			default:
 				if ( !IN_RANGE_CHAR( *src, 0x20, 0x7E ) )
 				{
-					int ret = IsValidUTF8( (unsigned char*)src, end - src );
+					int ret = IsValidUTF8( src, end - src );
 					if ( ret != 0 )
 					{
 						src += ret - 1;
@@ -5436,10 +5498,18 @@ static void Escape( char *dst, unsigned int *len, unsigned int size )
 			default:
 				if ( !IN_RANGE_CHAR( *dst, 0x20, 0x7E ) )
 				{
-					int ret = IsValidUTF8( (unsigned char*)dst, strEnd - dst );
+					int ret = IsValidUTF8( dst, strEnd - dst );
 					if ( ret == 0 )
 					{
-						if ( dst + 1 + sizeof(SQChar) * 2 >= memEnd )
+#ifdef SQUNICODE
+						const int charcount = sizeof(uint16_t) * 2;
+						uint16_t val = (uint16_t)*(unsigned char*)dst;
+#else
+						const int charcount = sizeof(char) * 2;
+						unsigned char val = *(unsigned char*)dst;
+#endif
+
+						if ( dst + 1 + charcount >= memEnd )
 						{
 							do
 							{
@@ -5450,15 +5520,17 @@ static void Escape( char *dst, unsigned int *len, unsigned int size )
 							break;
 						}
 
-						SQUnsignedChar val = (SQUnsignedChar)((unsigned char*)dst)[0];
-
-						_memmove( dst + 2 + sizeof(SQChar) * 2,
+						_memmove( dst + 2 + charcount,
 							dst + 1,
-							memEnd - ( dst + 2 + sizeof(SQChar) * 2 ),
+							memEnd - ( dst + 2 + charcount ),
 							memEnd );
 
 						dst[0] = '\\';
+#ifdef SQUNICODE
+						dst[1] = 'u';
+#else
 						dst[1] = 'x';
+#endif
 
 						int l = printhex< true, false >( dst + 2, memEnd - ( dst + 2 ), val );
 						dst += 1 + l;
@@ -5579,6 +5651,96 @@ static bool ReadStringifiedBytes( char *dst, int *len )
 }
 #endif
 
+template < typename C, typename I >
+static inline int printhex( int flags, C *buf, int size, I value )
+{
+	int len;
+
+	if ( !( flags & kFS_Uppercase ) )
+	{
+		if ( !( flags & kFS_NoPrefix ) )
+		{
+			if ( !( flags & kFS_Padding ) )
+			{
+				len = printhex< false, true, false >( buf, size, value );
+			}
+			else
+			{
+				len = printhex< true, true, false >( buf, size, value );
+			}
+		}
+		else
+		{
+			if ( !( flags & kFS_Padding ) )
+			{
+				len = printhex< false, false, false >( buf, size, value );
+			}
+			else
+			{
+				len = printhex< true, false, false >( buf, size, value );
+			}
+		}
+	}
+	else
+	{
+		if ( !( flags & kFS_NoPrefix ) )
+		{
+			if ( !( flags & kFS_Padding ) )
+			{
+				len = printhex< false, true, true >( buf, size, value );
+			}
+			else
+			{
+				len = printhex< true, true, true >( buf, size, value );
+			}
+		}
+		else
+		{
+			if ( !( flags & kFS_Padding ) )
+			{
+				len = printhex< false, false, true >( buf, size, value );
+			}
+			else
+			{
+				len = printhex< true, false, true >( buf, size, value );
+			}
+		}
+	}
+
+	return len;
+}
+
+template < typename C, typename I >
+static inline int printbin( int flags, C *buf, int size, I value )
+{
+	int len;
+
+	if ( !( flags & kFS_NoPrefix ) )
+	{
+		if ( !( flags & kFS_Padding ) )
+		{
+			len = printbin< false, true >( buf, size, value );
+		}
+		else
+		{
+			len = printbin< true, true >( buf, size, value );
+		}
+	}
+	else
+	{
+		if ( !( flags & kFS_Padding ) )
+		{
+			len = printbin< false, false >( buf, size, value );
+		}
+		else
+		{
+			len = printbin< true, false >( buf, size, value );
+		}
+	}
+
+	return len;
+}
+
 static inline string_t SpecialFloatValue( SQFloat val )
 {
 #define _check(v) \
@@ -5677,29 +5839,26 @@ string_t SQDebugServer::GetValue( const SQObject &obj, int flags )
 		{
 			if ( flags & kFS_Decimal )
 			{
-				const int size = FMT_INT_LEN;
-				char *buf = ScratchPad( size );
-				int len = printint( buf, size, _integer(obj) );
-				return { buf, (unsigned int)len };
+				if ( !( flags & kFS_Hexadecimal ) )
+				{
+					const int size = FMT_INT_LEN;
+					char *buf = ScratchPad( size );
+					int len = printint( buf, size, _integer(obj) );
+					return { buf, (unsigned int)len };
+				}
+				else
+				{
+					const int size = 2 + sizeof(SQFloat) * 2;
+					char *buf = ScratchPad( size );
+					int len = printhex( flags, buf, size, *(SQFloat_Int*)&_float(obj) );
+					return { buf, (unsigned int)len };
+				}
 			}
 			else if ( flags & kFS_Binary )
 			{
-				int len = 2 + ( sizeof(SQFloat) << 3 );
-				char *buf = ScratchPad( len );
-
-				char *c = buf;
-				*c++ = '0';
-				*c++ = 'b';
-
-				if ( flags & kFS_NoPrefix )
-				{
-					len -= 2;
-					c -= 2;
-				}
-
-				for ( int i = ( sizeof(SQFloat) << 3 ); i--; )
-					*c++ = '0' + ( ( _integer(obj) & ( (SQUnsignedInteger)1 << i ) ) != 0 );
-
+				const int size = 2 + sizeof(SQFloat) * 8;
+				char *buf = ScratchPad( size );
+				int len = printbin( flags | kFS_Padding, buf, size, *(SQFloat_Int*)&_float(obj) );
 				return { buf, (unsigned int)len };
 			}
 			else
@@ -5718,11 +5877,11 @@ getfloat:
 					}
 					else if ( flags & kFS_FloatG )
 					{
-						val.len = snprintf( val.ptr, size, "%g", _float(obj) );
+						val.len = snprintf( val.ptr, size, "%." FMT_FLT_DIG_STR "g", _float(obj) );
 					}
 					else
 					{
-						val.len = snprintf( val.ptr, size, "%f", _float(obj) );
+						val.len = snprintf( val.ptr, size, "%." FMT_FLT_DIG_STR "f", _float(obj) );
 					}
 
 					Assert( val.len < INT_MAX );
@@ -5733,64 +5892,7 @@ getfloat:
 		}
 		case OT_INTEGER:
 		{
-			if ( flags & kFS_Binary )
-			{
-				int i;
-
-				if ( !( flags & kFS_Padding ) )
-				{
-					// Print at 1, 2, 4 byte boundaries
-					if ( (SQUnsignedInteger)_integer(obj) > 0xFFFFFFFF )
-					{
-						i = sizeof(SQInteger) * 8;
-					}
-					else if ( (SQUnsignedInteger)_integer(obj) > 0x0000FFFF )
-					{
-						i = 4 * 8;
-					}
-					else if ( (SQUnsignedInteger)_integer(obj) > 0x000000FF )
-					{
-						i = 2 * 8;
-					}
-					else
-					{
-						i = 1 * 8;
-					}
-				}
-				else
-				{
-					i = sizeof(SQInteger) * 8;
-				}
-
-				unsigned int len = 2 + i;
-				char *buf = ScratchPad( len );
-				char *c = buf;
-				*c++ = '0';
-				*c++ = 'b';
-
-				if ( flags & kFS_NoPrefix )
-				{
-					len -= 2;
-					c -= 2;
-				}
-
-				while ( i-- )
-					*c++ = '0' + ( ( _integer(obj) & ( (SQUnsignedInteger)1 << i ) ) != 0 );
-
-				return { buf, len };
-			}
-			else if ( flags & kFS_Octal )
-			{
-				const int size = FMT_OCT_LEN;
-				char *buf = ScratchPad( size );
-				int len = printoct( buf, size, (SQUnsignedInteger)_integer(obj) );
-				return { buf, (unsigned int)len };
-			}
-			else if ( flags & kFS_Float )
-			{
-				goto getfloat;
-			}
-			else if ( flags & kFS_Character )
+			if ( flags & kFS_Character )
 			{
 				const int size = FMT_INT_LEN + FMT_PTR_LEN + 3;
 				char *buf = ScratchPad( size );
@@ -5798,23 +5900,47 @@ getfloat:
 
 				// Allow both signed and unsigned char values ( -1 == 255, -128 == 128, -127 == 129 )
 				if ( _integer(obj) >
-						(SQInteger)( (SQUnsignedChar)-1 >> (int)( sizeof(SQChar) >= sizeof(SQInteger) ) ) ||
+						( (SQInteger)(SQUnsignedChar)-1 >> (int)( sizeof(SQChar) >= sizeof(SQInteger) ) ) ||
 					_integer(obj) <
-						(SQInteger)-( ( (SQUnsignedChar)-1 >> 1 ) + 1 ) )
+						-( ( (SQInteger)(SQUnsignedChar)-1 >> 1 ) + 1 ) )
 				{
-					len = printint( buf, size, _integer(obj) );
+					if ( flags & kFS_Hexadecimal )
+					{
+						len = printhex< false >( buf, size, (SQUnsignedInteger)_integer(obj) );
+					}
+					else if ( flags & kFS_Octal )
+					{
+						len = printoct( buf, size, (SQUnsignedInteger)_integer(obj) );
+					}
+					else if ( flags & kFS_Binary )
+					{
+						len = printbin< false >( buf, size, (SQUnsignedInteger)_integer(obj) );
+					}
+					else
+					{
+						len = printint( buf, size, _integer(obj) );
+					}
+
 					return { buf, (unsigned int)len };
 				}
 
 				SQUnsignedChar ch = (SQUnsignedChar)_integer(obj);
 
-				if ( !( flags & kFS_Hexadecimal ) )
+				if ( flags & kFS_Hexadecimal )
 				{
-					len = printint( buf, size, (SQUnsignedInteger)ch );
+					len = printhex< false >( buf, size, ch );
+				}
+				else if ( flags & kFS_Octal )
+				{
+					len = printoct( buf, size, (SQUnsignedInteger)ch );
+				}
+				else if ( flags & kFS_Binary )
+				{
+					len = printbin< false >( buf, size, (SQUnsignedInteger)ch );
 				}
 				else
 				{
-					len = printhex< false >( buf, size, ch );
+					len = printint( buf, size, (SQUnsignedInteger)ch );
 				}
 
 				buf[len++] = ' ';
@@ -5828,90 +5954,67 @@ getfloat:
 					buf[len++] = (char)ch;
 				}
 #ifdef SQUNICODE
-				else if ( IsValidUnicode( (SQChar*)&ch, 1 ) )
+				else if ( IsValidUnicode( (SQChar*)&ch, 1 ) > 0 )
 				{
 					len += SQUnicodeToUTF8( buf + len, size - len - 1, (SQChar*)&ch, 1 );
+				}
+				else if ( ch < 0xA0 )
+				{
+					buf[len++] = '\\';
+					buf[len++] = 'x';
+					len += printhex< true, false, false >( buf + len, size, (unsigned char)ch );
 				}
 #endif
 				else
 				{
 					buf[len++] = '\\';
-					buf[len++] = 'x';
-
 #ifdef SQUNICODE
-					if ( ch <= 0xFF )
+#if WCHAR_SIZE == 4
+					if ( ch > 0xFFFF )
 					{
-						len += printhex< true, false, false >( buf + len, size, (unsigned char)ch );
+						buf[len++] = 'U';
+						len += printhex< true, false, false >( buf + len, size, ch );
 					}
 					else
 #endif
 					{
-						len += printhex< true, false, false >( buf + len, size, ch );
+						buf[len++] = 'u';
+						len += printhex< true, false, false >( buf + len, size, (uint16_t)ch );
 					}
+#else
+					buf[len++] = 'x';
+					len += printhex< true, false, false >( buf + len, size, (unsigned char)ch );
+#endif
 				}
 
 				buf[len++] = '\'';
 
 				return { buf, (unsigned int)len };
 			}
+			else if ( flags & kFS_Binary )
+			{
+				const int size = 2 + sizeof(SQInteger) * 8;
+				char *buf = ScratchPad( size );
+				int len = printbin( flags, buf, size, (SQUnsignedInteger)_integer(obj) );
+				return { buf, (unsigned int)len };
+			}
+			else if ( flags & kFS_Octal )
+			{
+				const int size = FMT_OCT_LEN;
+				char *buf = ScratchPad( size );
+				int len = printoct( buf, size, (SQUnsignedInteger)_integer(obj) );
+				return { buf, (unsigned int)len };
+			}
+			else if ( flags & kFS_Float )
+			{
+				goto getfloat;
+			}
 			// Check hex last to make watch format specifiers overwrite "format.hex" client option
 			else if ( ( flags & kFS_Hexadecimal ) && !( flags & kFS_Decimal ) )
 			{
 				const int size = FMT_PTR_LEN;
 				char *buf = ScratchPad( size );
-				int len;
-
-				if ( !( flags & kFS_Uppercase ) )
-				{
-					if ( !( flags & kFS_NoPrefix ) )
-					{
-						if ( !( flags & kFS_Padding ) )
-						{
-							len = printhex< false, true, false >( buf, size, (SQUnsignedInteger)_integer(obj) );
-						}
-						else
-						{
-							len = printhex< true, true, false >( buf, size, (SQUnsignedInteger)_integer(obj) );
-						}
-					}
-					else
-					{
-						if ( !( flags & kFS_Padding ) )
-						{
-							len = printhex< false, false, false >( buf, size, (SQUnsignedInteger)_integer(obj) );
-						}
-						else
-						{
-							len = printhex< true, false, false >( buf, size, (SQUnsignedInteger)_integer(obj) );
-						}
-					}
-				}
-				else
-				{
-					if ( !( flags & kFS_NoPrefix ) )
-					{
-						if ( !( flags & kFS_Padding ) )
-						{
-							len = printhex< false, true, true >( buf, size, (SQUnsignedInteger)_integer(obj) );
-						}
-						else
-						{
-							len = printhex< true, true, true >( buf, size, (SQUnsignedInteger)_integer(obj) );
-						}
-					}
-					else
-					{
-						if ( !( flags & kFS_Padding ) )
-						{
-							len = printhex< false, false, true >( buf, size, (SQUnsignedInteger)_integer(obj) );
-						}
-						else
-						{
-							len = printhex< true, false, true >( buf, size, (SQUnsignedInteger)_integer(obj) );
-						}
-					}
-				}
-
+				int len = printhex( flags, buf, size, (SQUnsignedInteger)_integer(obj) );
 				return { buf, (unsigned int)len };
 			}
 			else
@@ -6187,6 +6290,13 @@ getfloat:
 			}
 
 			goto default_label;
+		}
+		case OT_USERDATA:
+		{
+			const int size = FMT_PTR_LEN;
+			char *buf = ScratchPad( size );
+			int len = printhex( buf, size, (uintptr_t)_userdataval(obj) );
+			return { buf, (unsigned int)len };
 		}
 		default:
 		default_label:
@@ -7456,7 +7566,7 @@ SQInteger SQDebugServer::SQMM_Get( HSQUIRRELVM vm )
 
 	Assert( sq_type(mtenv) == OT_TABLE && _table(mtenv)->_delegate );
 	SQObjectPtr frame;
-	Verify( SQTable_Get( _table(mtenv)->_delegate, _SC(KW_CALLFRAME), frame ) );
+	Verify( SQTable_Get( SS_NOGC(_ss(vm),) _table(mtenv)->_delegate, _SC(KW_CALLFRAME), frame ) );
 	Assert( sq_type(frame) == OT_INTEGER && _integer(frame) >= 0 && _integer(frame) < vm->_callsstacksize );
 
 	if ( !( _integer(frame) >= 0 && _integer(frame) < vm->_callsstacksize ) )
@@ -7484,7 +7594,7 @@ SQInteger SQDebugServer::SQMM_Set( HSQUIRRELVM vm )
 
 	Assert( sq_type(mtenv) == OT_TABLE && _table(mtenv)->_delegate );
 	SQObjectPtr frame;
-	Verify( SQTable_Get( _table(mtenv)->_delegate, _SC(KW_CALLFRAME), frame ) );
+	Verify( SQTable_Get( SS_NOGC(_ss(vm),) _table(mtenv)->_delegate, _SC(KW_CALLFRAME), frame ) );
 	Assert( sq_type(frame) == OT_INTEGER && _integer(frame) >= 0 && _integer(frame) < vm->_callsstacksize );
 
 	if ( !( _integer(frame) >= 0 && _integer(frame) < vm->_callsstacksize ) )
@@ -7649,7 +7759,7 @@ bool SQDebugServer::GetVariable( HSQUIRRELVM vm, const SQVM::CallInfo *ci,
 
 	// env
 	SQObjectPtr env;
-	Verify( SQTable_Get( _table(mtenv)->_delegate, _SC(KW_DELEGATE), env ) );
+	Verify( SQTable_Get( SS_NOGC(_ss(vm),) _table(mtenv)->_delegate, _SC(KW_DELEGATE), env ) );
 
 	switch ( sq_type(env) )
 	{
@@ -7706,7 +7816,8 @@ bool SQDebugServer::GetVariable( HSQUIRRELVM vm, const SQVM::CallInfo *ci,
 #ifdef CLOSURE_ROOT
 	SQObjectPtr root;
 
-	if ( !SQTable_Get( _table(mtenv)->_delegate, _SC(KW_ROOT), root ) || sq_type(root) != OT_TABLE )
+	if ( !SQTable_Get( SS_NOGC(_ss(vm),) _table(mtenv)->_delegate, _SC(KW_ROOT), root ) ||
+			sq_type(root) != OT_TABLE )
 	{
 		// the user invalidated it, fix it
 		root = _thread(_ss(vm)->_root_vm)->_roottable;
@@ -7772,7 +7883,7 @@ bool SQDebugServer::SetVariable( HSQUIRRELVM vm, const SQVM::CallInfo *ci,
 
 	// env
 	SQObjectPtr env;
-	Verify( SQTable_Get( _table(mtenv)->_delegate, _SC(KW_DELEGATE), env ) );
+	Verify( SQTable_Get( SS_NOGC(_ss(vm),) _table(mtenv)->_delegate, _SC(KW_DELEGATE), env ) );
 
 	switch ( sq_type(env) )
 	{
@@ -7825,7 +7936,8 @@ bool SQDebugServer::SetVariable( HSQUIRRELVM vm, const SQVM::CallInfo *ci,
 #ifdef CLOSURE_ROOT
 	SQObjectPtr root;
 
-	if ( !SQTable_Get( _table(mtenv)->_delegate, _SC(KW_ROOT), root ) || sq_type(root) != OT_TABLE )
+	if ( !SQTable_Get( SS_NOGC(_ss(vm),) _table(mtenv)->_delegate, _SC(KW_ROOT), root ) ||
+			sq_type(root) != OT_TABLE )
 	{
 		// the user invalidated it, fix it
 		root = _thread(_ss(vm)->_root_vm)->_roottable;
@@ -7858,7 +7970,7 @@ bool SQDebugServer::NewSlot( HSQUIRRELVM vm, const SQObject &mtenv, const SQObje
 
 	// env
 	SQObjectPtr env;
-	Verify( SQTable_Get( _table(mtenv)->_delegate, _SC(KW_DELEGATE), env ) );
+	Verify( SQTable_Get( SS_NOGC(_ss(vm),) _table(mtenv)->_delegate, _SC(KW_DELEGATE), env ) );
 
 	Assert( sq_type(env) != OT_ARRAY );
 
@@ -8477,9 +8589,12 @@ public:
 		Token_Increment		= 0x10 | _op,
 		Token_Decrement		= 0x11 | _op,
 
-		Token_Mul			= 0x20 | _op,
-		Token_Div			= 0x21 | _op,
-		Token_Mod			= 0x22 | _op,
+#ifdef SQDBG_COMPILER_POW_OP
+		Token_Pow			= 0x20 | _op,
+#endif
+		Token_Mul			= 0x21 | _op,
+		Token_Div			= 0x22 | _op,
+		Token_Mod			= 0x23 | _op,
 
 		Token_Add			= 0x30 | _op,
 		Token_Sub			= 0x31 | _op,
@@ -8812,6 +8927,9 @@ unary:
 #endif
 				case Token_Div:
 				case Token_Mod:
+#ifdef SQDBG_COMPILER_POW_OP
+				case Token_Pow:
+#endif
 				case Token_LShift:
 				case Token_RShift:
 				case Token_URShift:
@@ -9005,7 +9123,7 @@ binary:
 						if ( res != CompileReturnCode_Success )
 							return res;
 
-						if ( closer != Token_End )
+						if ( closer != Token_End || m_prevToken == ';' )
 							m_cur--;
 					}
 					else
@@ -9020,7 +9138,7 @@ binary:
 						if ( res != CompileReturnCode_Success )
 							return res;
 
-						if ( closer != Token_End )
+						if ( closer != Token_End || m_prevToken == ';' )
 							m_cur--;
 					}
 
@@ -9796,6 +9914,19 @@ binary:
 									return CompileReturnCode_Success;
 								break;
 							}
+							case ';':
+							{
+								if ( closer == Token_End )
+								{
+									// Semicolon at end of expression
+									if ( Next() == Token_End )
+										return CompileReturnCode_Success;
+
+									return Evaluate( dbg, vm, frame, val, closer );
+								}
+
+								break;
+							}
 							case Token_End:
 							{
 								if ( closer == Token_End )
@@ -9936,6 +10067,9 @@ unary:
 #endif
 				case Token_Div:
 				case Token_Mod:
+#ifdef SQDBG_COMPILER_POW_OP
+				case Token_Pow:
+#endif
 				case Token_LShift:
 				case Token_RShift:
 				case Token_URShift:
@@ -10287,6 +10421,12 @@ binary:
 									return CompileReturnCode_Success;
 								break;
 							}
+							case ';':
+							{
+								if ( closer == Token_End )
+									return CompileReturnCode_Success;
+								break;
+							}
 							case Token_End:
 							{
 								if ( closer == Token_End )
@@ -10565,6 +10705,45 @@ private:
 				SetBool( out, !res );
 				return true;
 			}
+#ifdef SQDBG_COMPILER_POW_OP
+			case Token_Pow:
+			{
+				SQObjectType tl = sq_type(lhs);
+				SQObjectType tr = sq_type(rhs);
+
+				if ( ( tl | tr ) == OT_INTEGER )
+				{
+					out = (SQFloat)pow( (double)_integer(lhs), (double)_integer(rhs) );
+					return true;
+				}
+				else if ( ( tl | tr ) == OT_FLOAT )
+				{
+					SQFloat fl = _float(lhs);
+					SQFloat fr = _float(rhs);
+
+					out = (SQFloat)pow( fl, fr );
+					return true;
+				}
+				else if ( tl == OT_INTEGER && tr == OT_FLOAT )
+				{
+					SQFloat fl = (SQFloat)_integer(lhs);
+					SQFloat fr = _float(rhs);
+
+					out = (SQFloat)pow( fl, fr );
+					return true;
+				}
+				else if ( tl == OT_FLOAT && tr == OT_INTEGER )
+				{
+					SQFloat fl = _float(lhs);
+					SQFloat fr = (SQFloat)_integer(rhs);
+
+					out = (SQFloat)pow( fl, fr );
+					return true;
+				}
+
+				return false;
+			}
+#endif
 			default: UNREACHABLE();
 		}
 	}
@@ -10741,7 +10920,7 @@ private:
 				case '(': case ')':
 				case '{': case '}':
 				case INTERNAL_TAG_PREFIX:
-				case '?':
+				case '?': case ';':
 				{
 					return *m_cur;
 				}
@@ -10827,6 +11006,12 @@ private:
 					{
 						return Token_AssignXor;
 					}
+#ifdef SQDBG_COMPILER_POW_OP
+					else if ( m_cur + 1 < m_end && m_cur[1] == '^' )
+					{
+						return Token_Pow;
+					}
+#endif
 					else
 					{
 						return Token_BwXor;
@@ -11012,7 +11197,7 @@ private:
 				case '(': case ')':
 				case '{': case '}':
 				case INTERNAL_TAG_PREFIX:
-				case '?':
+				case '?': case ';':
 				{
 					token.type = *m_cur++;
 					return token;
@@ -11131,6 +11316,13 @@ private:
 						m_cur++;
 						token.type = Token_AssignXor;
 					}
+#ifdef SQDBG_COMPILER_POW_OP
+					else if ( m_cur < m_end && *m_cur == '^' )
+					{
+						m_cur++;
+						token.type = Token_Pow;
+					}
+#endif
 					else
 					{
 						token.type = Token_BwXor;
@@ -12987,6 +13179,7 @@ bool SQDebugServer::GetObj_VarRef( const varref_t *ref, string_t &expression, ob
 		}
 		case VARREF_INSTRUCTIONS:
 		case VARREF_CALLSTACK:
+		case VARREF_BREAKPOINT:
 		{
 			return false;
 		}
@@ -13139,9 +13332,27 @@ check:
 				case 'x': flags |= kFS_Hexadecimal; break;
 				case 'X': flags |= kFS_Hexadecimal | kFS_Uppercase; break;
 				case 'b': flags |= kFS_Binary; break;
-				case 'd': flags |= kFS_Decimal; break;
 				case 'o': flags |= kFS_Octal; break;
-				case 'c': flags |= kFS_Character; break;
+				case 'd':
+					if ( flags & kFS_Decimal )
+						return 0;
+
+					flags |= kFS_Decimal;
+
+					if ( c < end )
+						goto check;
+
+					break;
+				case 'c':
+					if ( flags & kFS_Character )
+						return 0;
+
+					flags |= kFS_Character;
+
+					if ( c < end )
+						goto check;
+
+					break;
 				case 'f': flags |= kFS_Float; break;
 				case 'e': flags |= kFS_FloatE; break;
 				case 'g': flags |= kFS_FloatG; break;
@@ -13310,6 +13521,19 @@ void SQDebugServer::OnRequest_Evaluate( const json_table_t &arguments, int seq )
 				DAP_ERROR_BODY( 0, "could not evaluate expression" );
 				DAP_SEND();
 			}
+
+			return;
+		}
+		else if ( expression.IsEqualTo( INTERNAL_TAG("breakpoints") ) )
+		{
+			DAP_START_RESPONSE( seq, "evaluate" );
+			DAP_SET_TABLE( body );
+				body.SetIntBrackets( "result", m_Breakpoints.Size() + m_DataWatches.Size() );
+				body.SetInt( "variablesReference", ToVarRef( VARREF_BREAKPOINT ) );
+				wjson_table_t hint = body.SetTable( "presentationHint" );
+				wjson_array_t attributes = hint.SetArray( "attributes" );
+				attributes.Append( "readOnly" );
+			DAP_SEND();
 
 			return;
 		}
@@ -14617,12 +14841,14 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 
 						if ( !( m_iYieldValues & (1<<(i+1)) ) )
 						{
-							buf.Puts( "return@" );
+							buf.Puts( "return" );
 						}
 						else
 						{
-							buf.Puts( "yield@" );
+							buf.Puts( "yield" );
 						}
+
+						buf.Put( '@' );
 
 						if ( rv.funcname )
 						{
@@ -14834,6 +15060,7 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 					}
 
 					// done with arrays
+					goto obj_done;
 				}
 
 				// delegates
@@ -15611,14 +15838,36 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 
 						break;
 					}
+					case OT_USERDATA:
+					{
+						{
+							wjson_table_t elem = variables.AppendTable();
+							elem.SetString( "name", "size" );
+							elem.SetString( "value", GetValue( _userdata(target)->_size ) );
+							elem.SetInt( "variablesReference", -1 );
+							SetVirtualHint( elem );
+						}
+						{
+							wjson_table_t elem = variables.AppendTable();
+							elem.SetString( "name", "tag" );
+							{
+								jstringbuf_t buf = elem.SetStringAsBuf( "value" );
+								buf.PutHex( (uintptr_t)_userdata(target)->_typetag );
+							}
+							elem.SetInt( "variablesReference", -1 );
+							SetVirtualHint( elem );
+						}
+
+						break;
+					}
 					case OT_STRING:
 					case OT_ARRAY:
 					case OT_WEAKREF:
-					case OT_USERDATA:
 						break;
 					default:
 						Assert(!"unknown type");
 				}
+obj_done:;
 			DAP_SEND();
 			break;
 		}
@@ -15977,114 +16226,208 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 			DAP_START_RESPONSE( seq, "variables" );
 			DAP_SET_TABLE( body );
 				wjson_array_t variables = body.SetArray( "variables" );
+				DumpStack( vm, frame, flags, variables );
+			DAP_SEND();
 
-				int stackbase = 0;
-				int callframe = -1;
-				int next = vm->_callsstacksize ? vm->_callsstack[0]._prevstkbase : 0;
-				int idx = 0;
-				const int max = vm->_stack.size();
-
-				for (;;)
-				{
-					callframe++;
-
-					if ( callframe < vm->_callsstacksize )
-					{
-						stackbase = next;
-
-						if ( callframe + 1 < vm->_callsstacksize )
-						{
-							next = stackbase + vm->_callsstack[ callframe + 1 ]._prevstkbase;
-						}
-						else
-						{
-							next = max;
-						}
-					}
-					else
-					{
-						if ( callframe )
-							callframe--;
-
-						next = max;
-					}
-
-					for ( ; idx < next; idx++ )
-					{
-						const SQObjectPtr &val = vm->_stack._vals[idx];
-
-						if ( idx > vm->_top && sq_type(val) == OT_NULL )
-							continue;
-
-						wjson_table_t elem = variables.AppendTable();
-						{
-							jstringbuf_t name = elem.SetStringAsBuf( "name" );
-							name.Put('[');
-
-							if ( !( flags & kFS_Hexadecimal ) )
-							{
-								name.PutInt( callframe );
-							}
-							else
-							{
-								name.PutHex( (unsigned int)callframe, false );
-							}
-
-							name.Put(']');
-							name.Put('[');
-
-							if ( !( flags & kFS_Hexadecimal ) )
-							{
-								name.PutInt( idx - stackbase );
-							}
-							else
-							{
-								name.PutHex( (unsigned int)( idx - stackbase ), false );
-							}
-
-							name.Put(']');
-
-							if ( idx == stackbase )
-							{
-								name.Put('*');
-
-								if ( callframe == frame )
-								{
-									name.Put('~');
-								}
-#ifndef NATIVE_DEBUG_HOOK
-								else if ( m_State == ThreadState_Suspended &&
-										callframe == vm->_callsstacksize - 1 )
-								{
-									if ( sq_type(vm->_callsstack[callframe]._closure) == OT_NATIVECLOSURE &&
-											_nativeclosure(vm->_callsstack[callframe]._closure)->_function ==
-												&SQDebugServer::SQDebugHook )
-									{
-										name.Put('d');
-									}
-								}
-#endif
-							}
-							else if ( vm->_top == idx )
-							{
-								name.Put('_');
-							}
-						}
-						JSONSetString( elem, "value", val, flags );
-						elem.SetString( "type", GetType( val ) );
-						elem.SetInt( "variablesReference", ToVarRef( val ) );
-						if ( ShouldPageArray( val, 16 * ARRAY_PAGE_LIMIT ) )
-							elem.SetInt( "indexedVariables", (int)_array(val)->_values.size() );
-					}
-
-					if ( next == max )
-						break;
-				}
+			break;
+		}
+		case VARREF_BREAKPOINT:
+		{
+			DAP_START_RESPONSE( seq, "variables" );
+			DAP_SET_TABLE( body );
+				wjson_array_t variables = body.SetArray( "variables" );
+				DumpBreakpoints( variables );
 			DAP_SEND();
 
 			break;
 		}
 		default: UNREACHABLE();
+	}
+}
+
+void SQDebugServer::DumpStack( HSQUIRRELVM vm, int frame, int flags, wjson_array_t &variables )
+{
+	int stackbase = 0;
+	int callframe = -1;
+	int next = vm->_callsstacksize ? vm->_callsstack[0]._prevstkbase : 0;
+	int idx = 0;
+	const int max = vm->_stack.size();
+
+	for (;;)
+	{
+		callframe++;
+
+		if ( callframe < vm->_callsstacksize )
+		{
+			stackbase = next;
+
+			if ( callframe + 1 < vm->_callsstacksize )
+			{
+				next = stackbase + vm->_callsstack[ callframe + 1 ]._prevstkbase;
+			}
+			else
+			{
+				next = max;
+			}
+		}
+		else
+		{
+			if ( callframe )
+				callframe--;
+
+			next = max;
+		}
+
+		for ( ; idx < next; idx++ )
+		{
+			const SQObjectPtr &val = vm->_stack._vals[idx];
+
+			if ( idx > vm->_top && sq_type(val) == OT_NULL )
+				continue;
+
+			wjson_table_t elem = variables.AppendTable();
+			{
+				jstringbuf_t name = elem.SetStringAsBuf( "name" );
+				name.Put('[');
+
+				if ( !( flags & kFS_Hexadecimal ) )
+				{
+					name.PutInt( callframe );
+				}
+				else
+				{
+					name.PutHex( (unsigned int)callframe, false );
+				}
+
+				name.Put(']');
+				name.Put('[');
+
+				if ( !( flags & kFS_Hexadecimal ) )
+				{
+					name.PutInt( idx - stackbase );
+				}
+				else
+				{
+					name.PutHex( (unsigned int)( idx - stackbase ), false );
+				}
+
+				name.Put(']');
+
+				if ( idx == stackbase )
+				{
+					name.Put('*');
+
+					if ( callframe == frame )
+					{
+						name.Put('~');
+					}
+#ifndef NATIVE_DEBUG_HOOK
+					else if ( m_State == ThreadState_Suspended &&
+							callframe == vm->_callsstacksize - 1 )
+					{
+						if ( sq_type(vm->_callsstack[callframe]._closure) == OT_NATIVECLOSURE &&
+								_nativeclosure(vm->_callsstack[callframe]._closure)->_function ==
+									&SQDebugServer::SQDebugHook )
+						{
+							name.Put('d');
+						}
+					}
+#endif
+				}
+				else if ( vm->_top == idx )
+				{
+					name.Put('_');
+				}
+			}
+			JSONSetString( elem, "value", val, flags );
+			elem.SetString( "type", GetType( val ) );
+			elem.SetInt( "variablesReference", ToVarRef( val ) );
+			if ( ShouldPageArray( val, 16 * ARRAY_PAGE_LIMIT ) )
+				elem.SetInt( "indexedVariables", (int)_array(val)->_values.size() );
+		}
+
+		if ( next == max )
+			break;
+	}
+}
+
+void SQDebugServer::DumpBreakpoints( wjson_array_t &variables )
+{
+	// line breakpoint
+	for ( unsigned int i = 0; i < m_nFunctionBreakpointsIdx; i++ )
+	{
+		const breakpoint_t &bp = m_Breakpoints[i];
+
+		wjson_table_t elem = variables.AppendTable();
+		elem.SetIntBrackets( "name", bp.id );
+		{
+			jstringbuf_t value = elem.SetStringAsBuf( "value" );
+			value.Puts( bp.src );
+
+			if ( bp.line )
+			{
+				value.Put(':');
+				value.PutInt( bp.line );
+			}
+		}
+		elem.SetInt( "variablesReference", -1 );
+	}
+
+	// function breakpoint
+	for ( unsigned int i = m_nFunctionBreakpointsIdx; i < m_Breakpoints.Size(); i++ )
+	{
+		const breakpoint_t &bp = m_Breakpoints[i];
+
+		wjson_table_t elem = variables.AppendTable();
+		elem.SetIntBrackets( "name", bp.id );
+		{
+			jstringbuf_t value = elem.SetStringAsBuf( "value" );
+			value.Puts( bp.src );
+
+			if ( !bp.funcsrc.IsEmpty() )
+			{
+				value.Put(',');
+				value.Puts( bp.funcsrc );
+			}
+
+			if ( bp.line )
+			{
+				value.Put(':');
+				value.PutInt( bp.line );
+			}
+		}
+		elem.SetInt( "variablesReference", -1 );
+	}
+
+	// data breakpoint
+	for ( unsigned int i = 0; i < m_DataWatches.Size(); i++ )
+	{
+		const datawatch_t &dw = m_DataWatches[i];
+
+		wjson_table_t elem = variables.AppendTable();
+		elem.SetIntBrackets( "name", dw.id );
+		{
+			jstringbuf_t value = elem.SetStringAsBuf( "value" );
+
+			if ( dw.container )
+			{
+				value.Put('[');
+				value.PutHex( (uintptr_t)_refcounted(dw.container->_obj) );
+				value.Put(' ');
+				value.Puts( GetType( dw.container->_obj ) );
+				value.Put(']');
+				value.Put('-');
+				value.Put('>');
+				value.Puts( dw.name );
+			}
+			else
+			{
+				value.Put('`');
+				value.Puts( dw.name );
+				value.Put('`');
+			}
+		}
+		elem.SetInt( "variablesReference", -1 );
 	}
 }
 
@@ -16137,20 +16480,21 @@ void SQDebugServer::OnRequest_SetVariable( const json_table_t &arguments, int se
 	}
 
 	// Requires special value parsing
-	switch ( ref->type )
+	if ( ref->type == VARREF_INSTRUCTIONS )
 	{
-		case VARREF_INSTRUCTIONS:
-		{
 #ifdef SQDBG_SUPPORTS_SET_INSTRUCTION
-			OnRequest_SetVariable_Instruction( ref, strName, strValue, seq );
+		OnRequest_SetVariable_Instruction( ref, strName, strValue, seq );
 #else
-			DAP_ERROR_RESPONSE( seq, "setVariable" );
-			DAP_ERROR_BODY( 0, "" );
-			DAP_SEND();
+		DAP_ERROR_RESPONSE( seq, "setVariable" );
+		DAP_ERROR_BODY( 0, "" );
+		DAP_SEND();
 #endif
-			return;
-		}
-		default: break;
+		return;
+	}
+	else if ( ref->type == VARREF_BREAKPOINT )
+	{
+		OnRequest_SetVariable_Breakpoint( strName, strValue, seq );
+		return;
 	}
 
 	if ( strName.IsEmpty() || strValue.IsEmpty() )
@@ -16349,6 +16693,88 @@ void SQDebugServer::OnRequest_SetVariable_Instruction( const varref_t *ref,
 	DAP_SEND();
 }
 #endif
+
+void SQDebugServer::OnRequest_SetVariable_Breakpoint(
+		string_t &strName,
+		string_t &strValue,
+		int seq )
+{
+	if ( strName.len <= 2 )
+	{
+		DAP_ERROR_RESPONSE( seq, "setVariable" );
+		DAP_ERROR_BODY( 0, "invalid index" );
+			error.SetBool( "showUser", true );
+		DAP_SEND();
+		return;
+	}
+
+	if ( !strValue.IsEmpty() )
+	{
+		DAP_ERROR_RESPONSE( seq, "setVariable" );
+		DAP_ERROR_BODY( 0, "editing breakpoints is not supported, empty value to remove" );
+			error.SetBool( "showUser", true );
+		DAP_SEND();
+		return;
+	}
+
+	AssertClient( strName.ptr[0] == '[' && strName.ptr[ strName.len - 1 ] == ']' );
+
+	int breakpointId;
+	strName.ptr++;
+	strName.len -= 2;
+	atoi( strName, &breakpointId );
+
+	if ( breakpointId > 0 && breakpointId < m_nBreakpointIndex )
+	{
+		for ( unsigned int i = 0; i < m_Breakpoints.Size(); i++ )
+		{
+			breakpoint_t &bp = m_Breakpoints[i];
+			if ( bp.id == breakpointId )
+			{
+				FreeBreakpoint( bp );
+				m_Breakpoints.Remove( i );
+
+				if ( i < m_nFunctionBreakpointsIdx )
+					m_nFunctionBreakpointsIdx--;
+
+				goto success;
+			}
+		}
+	}
+
+	for ( unsigned int i = 0; i < m_DataWatches.Size(); i++ )
+	{
+		datawatch_t &dw = m_DataWatches[i];
+		if ( dw.id == breakpointId )
+		{
+			FreeDataWatch( dw );
+			m_DataWatches.Remove( i );
+
+			goto success;
+		}
+	}
+
+	DAP_ERROR_RESPONSE( seq, "setVariable" );
+	DAP_ERROR_BODY( 0, "invalid index" );
+		error.SetBool( "showUser", true );
+	DAP_SEND();
+	return;
+
+success:
+	DAP_START_RESPONSE( seq, "setVariable" );
+	DAP_SET_TABLE( body );
+		body.SetString( "value", "" );
+		body.SetInt( "variablesReference", -1 );
+	DAP_SEND();
+
+	DAP_START_EVENT( ++m_Sequence, "breakpoint" );
+	DAP_SET_TABLE( body );
+		body.SetString( "reason", "removed" );
+		wjson_table_t bp = body.SetTable( "breakpoint" );
+		bp.SetInt( "id", breakpointId );
+		bp.SetBool( "verified", false );
+	DAP_SEND();
+}
 
 void SQDebugServer::OnRequest_SetExpression( const json_table_t &arguments, int seq )
 {
@@ -17427,6 +17853,28 @@ void SQDebugServer::UndoRestoreCachedInstructions()
 	}
 }
 
+int SQDebugServer::ToVarRef( EVARREF type )
+{
+	Assert( type >= 0 && type < VARREF_MAX );
+	Assert( !IsObjectRef( type ) && !IsScopeRef( type ) );
+
+	for ( unsigned int i = 0; i < m_Vars.Size(); i++ )
+	{
+		const varref_t &v = m_Vars[i];
+		if ( v.type == type )
+		{
+			return v.id;
+		}
+	}
+
+	Assert( m_nVarRefIndex < INT_MAX );
+	varref_t *var = &m_Vars.Append();
+	var->id = ++m_nVarRefIndex;
+	var->type = type;
+
+	return var->id;
+}
+
 int SQDebugServer::ToVarRef( EVARREF type, HSQUIRRELVM vm, int frame )
 {
 	Assert( IsScopeRef( type ) );
@@ -17435,7 +17883,7 @@ int SQDebugServer::ToVarRef( EVARREF type, HSQUIRRELVM vm, int frame )
 
 	for ( unsigned int i = 0; i < m_Vars.Size(); i++ )
 	{
-		varref_t &v = m_Vars[i];
+		const varref_t &v = m_Vars[i];
 		if ( v.type == type && v.scope.frame == frame && v.scope.thread == thread )
 			return v.id;
 	}
@@ -17477,7 +17925,7 @@ int SQDebugServer::ToVarRef( EVARREF type, const SQObject &obj, bool isStrong )
 	for ( int i = m_Vars.Size(); i--; )
 	{
 		varref_t &v = m_Vars[i];
-		if ( v.type == type && _rawval(v.GetVar()) == _rawval(obj) )
+		if ( v.type == type && _userpointer(v.GetVar()) == _userpointer(obj) )
 		{
 			ConvertToWeakRef( v );
 			return v.id;
@@ -17496,7 +17944,7 @@ int SQDebugServer::ToVarRef( EVARREF type, const SQObject &obj, bool isStrong )
 	__ObjAddRef( var->obj.weakref );
 
 	Assert( sq_type(var->obj.weakref->_obj) != OT_NULL );
-	Assert( _rawval(var->obj.weakref->_obj) == _rawval(obj) );
+	Assert( _userpointer(var->obj.weakref->_obj) == _userpointer(obj) );
 
 	if ( isStrong )
 	{
@@ -17529,7 +17977,7 @@ varref_t *SQDebugServer::FromVarRef( int id )
 		{
 			Assert( var->type >= 0 && var->type < VARREF_MAX );
 
-			if ( IsScopeRef( var->type ) ||
+			if ( !IsObjectRef( var->type ) ||
 					var->obj.isStrong || sq_type(var->GetVar()) != OT_NULL )
 				return var;
 
@@ -17581,7 +18029,6 @@ void SQDebugServer::RemoveVarRefs( bool all )
 				if ( rem )
 					m_Vars.Remove(i);
 			}
-			else UNREACHABLE();
 		}
 	}
 	else
@@ -17936,7 +18383,7 @@ void SQDebugServer::DefineClass( SQClass *target, SQTable *params )
 
 	SQObjectPtr name;
 
-	if ( SQTable_Get( params, _SC("name"), name ) )
+	if ( SQTable_Get( SS_NOGC(_ss(m_pRootVM),) params, _SC("name"), name ) )
 	{
 		if ( sq_type(name) == OT_STRING && _string(name)->_len )
 		{
@@ -17955,7 +18402,7 @@ void SQDebugServer::DefineClass( SQClass *target, SQTable *params )
 
 	SQObjectPtr value;
 
-	if ( SQTable_Get( params, _SC("value"), value ) )
+	if ( SQTable_Get( SS_NOGC(_ss(m_pRootVM),) params, _SC("value"), value ) )
 	{
 		if ( sq_type(def->value) != OT_NULL )
 		{
@@ -17973,7 +18420,7 @@ void SQDebugServer::DefineClass( SQClass *target, SQTable *params )
 
 	SQObjectPtr metamembers;
 
-	if ( SQTable_Get( params, _SC("metamembers"), metamembers ) )
+	if ( SQTable_Get( SS_NOGC(_ss(m_pRootVM),) params, _SC("metamembers"), metamembers ) )
 	{
 		if ( sq_type(def->metamembers) != OT_NULL )
 		{
@@ -17991,7 +18438,7 @@ void SQDebugServer::DefineClass( SQClass *target, SQTable *params )
 
 	SQObjectPtr custommembers;
 
-	if ( SQTable_Get( params, _SC("custommembers"), custommembers ) )
+	if ( SQTable_Get( SS_NOGC(_ss(m_pRootVM),) params, _SC("custommembers"), custommembers ) )
 	{
 		if ( sq_type(def->custommembers) != OT_NULL )
 		{
@@ -18375,6 +18822,9 @@ void SQDebugServer::ProfSwitchThread( HSQUIRRELVM vm )
 	__ObjAddRef( tp.thread );
 
 	m_pProfiler = &tp.prof;
+#ifdef NO_GARBAGE_COLLECTOR
+	m_pProfiler->m_ss = _ss(vm);
+#endif
 	m_pProfiler->Start( vm );
 }
 
@@ -18527,31 +18977,31 @@ void SQDebugServer::PrintVar( HSQUIRRELVM vm, const SQChar *name, const SQObject
 	switch ( sq_type(obj) )
 	{
 		case OT_NULL:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] NULL\n"), name );
+			SQErrorNoFrame( vm, _SC("[%s] NULL\n"), name );
 			break;
 		case OT_INTEGER:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] " FMT_INT "\n"), name, _integer(obj) );
+			SQErrorNoFrame( vm, _SC("[%s] " FMT_INT "\n"), name, _integer(obj) );
 			break;
 		case OT_FLOAT:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] %.14g\n"), name, _float(obj) );
+			SQErrorNoFrame( vm, _SC("[%s] %." FMT_FLT_DIG_STR "g\n"), name, _float(obj) );
 			break;
 		case OT_USERPOINTER:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] USERPOINTER\n"), name );
+			SQErrorNoFrame( vm, _SC("[%s] USERPOINTER " FMT_PTR "\n"), name, (uintptr_t)_userpointer(obj) );
 			break;
 		case OT_STRING:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] \"%.50s\"\n"), name, _string(obj)->_val );
+			SQErrorNoFrame( vm, _SC("[%s] \"%.50s\"\n"), name, _string(obj)->_val );
 			break;
 		case OT_TABLE:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] TABLE (#" FMT_INT ")\n"), name, _table(obj)->CountUsed() );
+			SQErrorNoFrame( vm, _SC("[%s] TABLE (#" FMT_INT ")\n"), name, _table(obj)->CountUsed() );
 			break;
 		case OT_ARRAY:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] ARRAY (#" FMT_INT ")\n"), name, _array(obj)->Size() );
+			SQErrorNoFrame( vm, _SC("[%s] ARRAY (#" FMT_INT ")\n"), name, _array(obj)->Size() );
 			break;
 		case OT_CLOSURE:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] CLOSURE\n"), name );
+			SQErrorNoFrame( vm, _SC("[%s] CLOSURE\n"), name );
 			break;
 		case OT_NATIVECLOSURE:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] NATIVECLOSURE\n"), name );
+			SQErrorNoFrame( vm, _SC("[%s] NATIVECLOSURE\n"), name );
 			break;
 		case OT_GENERATOR:
 		{
@@ -18559,20 +19009,20 @@ void SQDebugServer::PrintVar( HSQUIRRELVM vm, const SQChar *name, const SQObject
 
 			if ( sq_type(funcname) == OT_STRING )
 			{
-				SQErrorAtFrame( vm, NULL, _SC("[%s] GENERATOR (%s)\n"), name, _string(funcname)->_val );
+				SQErrorNoFrame( vm, _SC("[%s] GENERATOR (%s)\n"), name, _string(funcname)->_val );
 			}
 			else
 			{
-				SQErrorAtFrame( vm, NULL, _SC("[%s] GENERATOR\n"), name );
+				SQErrorNoFrame( vm, _SC("[%s] GENERATOR\n"), name );
 			}
 
 			break;
 		}
 		case OT_USERDATA:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] USERDATA\n"), name );
+			SQErrorNoFrame( vm, _SC("[%s] USERDATA " FMT_PTR "\n"), name, (uintptr_t)_userdataval(obj) );
 			break;
 		case OT_THREAD:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] THREAD\n"), name );
+			SQErrorNoFrame( vm, _SC("[%s] THREAD\n"), name );
 			break;
 		case OT_CLASS:
 		{
@@ -18580,12 +19030,12 @@ void SQDebugServer::PrintVar( HSQUIRRELVM vm, const SQChar *name, const SQObject
 
 			if ( def && def->name.ptr )
 			{
-				SQErrorAtFrame( vm, NULL, _SC("[%s] CLASS (" FMT_CSTR ")\n"),
+				SQErrorNoFrame( vm, _SC("[%s] CLASS (" FMT_CSTR ")\n"),
 						name, def->name.ptr + FMT_PTR_LEN + 1 );
 			}
 			else
 			{
-				SQErrorAtFrame( vm, NULL, _SC("[%s] CLASS\n"), name );
+				SQErrorNoFrame( vm, _SC("[%s] CLASS\n"), name );
 			}
 
 			break;
@@ -18596,12 +19046,12 @@ void SQDebugServer::PrintVar( HSQUIRRELVM vm, const SQChar *name, const SQObject
 
 			if ( def && def->name.ptr )
 			{
-				SQErrorAtFrame( vm, NULL, _SC("[%s] INSTANCE (" FMT_CSTR ")\n"),
+				SQErrorNoFrame( vm, _SC("[%s] INSTANCE (" FMT_CSTR ")\n"),
 						name, def->name.ptr + FMT_PTR_LEN + 1 );
 			}
 			else
 			{
-				SQErrorAtFrame( vm, NULL, _SC("[%s] INSTANCE\n"), name );
+				SQErrorNoFrame( vm, _SC("[%s] INSTANCE\n"), name );
 			}
 
 			break;
@@ -18610,7 +19060,7 @@ void SQDebugServer::PrintVar( HSQUIRRELVM vm, const SQChar *name, const SQObject
 			PrintVar( vm, name, _weakref(obj)->_obj );
 			break;
 		case OT_BOOL:
-			SQErrorAtFrame( vm, NULL, _SC("[%s] %s\n"), name, _integer(obj) ? _SC("true") : _SC("false") );
+			SQErrorNoFrame( vm, _SC("[%s] %s\n"), name, _integer(obj) ? _SC("true") : _SC("false") );
 			break;
 		default: UNREACHABLE();
 	}
@@ -18618,7 +19068,7 @@ void SQDebugServer::PrintVar( HSQUIRRELVM vm, const SQChar *name, const SQObject
 
 void SQDebugServer::PrintStack( HSQUIRRELVM vm )
 {
-	SQErrorAtFrame( vm, NULL, _SC("\nCALLSTACK\n") );
+	SQErrorNoFrame( vm, _SC("\nCALLSTACK\n") );
 
 	int frame = vm->_callsstacksize;
 
@@ -18657,10 +19107,10 @@ void SQDebugServer::PrintStack( HSQUIRRELVM vm )
 		}
 		else UNREACHABLE();
 
-		SQErrorAtFrame( vm, NULL, _SC("*FUNCTION [%s()] %s line [%d]\n"), fn, src, line );
+		SQErrorNoFrame( vm, _SC("*FUNCTION [%s()] %s line [%d]\n"), fn, src, line );
 	}
 
-	SQErrorAtFrame( vm, NULL, _SC("\nLOCALS\n") );
+	SQErrorNoFrame( vm, _SC("\nLOCALS\n") );
 
 	frame = vm->_callsstacksize;
 
@@ -18736,9 +19186,12 @@ void SQDebugServer::ErrorHandler( HSQUIRRELVM vm )
 	if ( getError )
 		err = GetValue( oe, kFS_NoQuote );
 
-	SQErrorAtFrame( vm, NULL, _SC("\nAN ERROR HAS OCCURRED [" FMT_VCSTR "]\n"), STR_EXPAND(err) );
+	SQErrorNoFrame( vm, _SC("\nAN ERROR HAS OCCURRED [" FMT_VCSTR "]\n"), err.len, err.ptr );
 	PrintStack( vm );
 #endif
+
+	if ( !IsClientConnected() )
+		return;
 
 	if ( getError )
 		err = GetValue( oe, kFS_NoQuote );
@@ -19170,11 +19623,7 @@ exit:;
 	const SQVM::CallInfo *ci = vm->_callsstack + frame;
 
 	_OutputDebugStringA( buf );
-#ifdef SQUNICODE
 	m_Print( vm, _SC(FMT_CSTR), buf );
-#else
-	m_Print( vm, buf );
-#endif
 	SendEvent_OutputStdOut( string_t( buf, (int)( pWrite - buf ) ), ci );
 }
 
@@ -19743,7 +20192,8 @@ void SQDebugServer::DebugHook( HSQUIRRELVM vm, int type,
 						{
 							buf.Puts( "(sqdbg) Breakpoint hit " );
 							buf.Puts( func );
-							buf.Puts( "() @ " );
+							buf.Puts( "()" );
+							buf.Puts( " @ " );
 							buf.Puts( src );
 
 							if ( line )
@@ -19767,7 +20217,9 @@ void SQDebugServer::DebugHook( HSQUIRRELVM vm, int type,
 					{
 						if ( !src.IsEmpty() )
 						{
-							buf.Puts( "(sqdbg) Breakpoint hit 'anonymous function' @ " );
+							buf.Puts( "(sqdbg) Breakpoint hit " );
+							buf.Puts( "'anonymous function'" );
+							buf.Puts( " @ " );
 							buf.Puts( src );
 
 							if ( line )
@@ -19780,7 +20232,9 @@ void SQDebugServer::DebugHook( HSQUIRRELVM vm, int type,
 						}
 						else
 						{
-							buf.Puts( "(sqdbg) Breakpoint hit 'anonymous function'\n" );
+							buf.Puts( "(sqdbg) Breakpoint hit " );
+							buf.Puts( "'anonymous function'" );
+							buf.Put( '\n' );
 						}
 
 						buf.Term();
@@ -19980,45 +20434,6 @@ void SQDebugServer::SendEvent_OutputStdOut( const T &strOutput, const SQVM::Call
 		DAP_SEND();
 	}
 }
-
-void SQDebugServer::OnSQPrint( HSQUIRRELVM vm, const SQChar *buf, int len )
-{
-	m_Print( vm, buf );
-
-	const SQVM::CallInfo *ci = NULL;
-
-	// Assume the latest script function is the output source
-	for ( int i = vm->_callsstacksize; i-- > 0; )
-	{
-		if ( sq_type(vm->_callsstack[i]._closure) == OT_CLOSURE )
-		{
-			ci = vm->_callsstack + i;
-			break;
-		}
-	}
-
-	SendEvent_OutputStdOut( sqstring_t( buf, len ), ci );
-}
-
-void SQDebugServer::OnSQError( HSQUIRRELVM vm, const SQChar *buf, int len )
-{
-	m_PrintError( vm, buf );
-
-	const SQVM::CallInfo *ci = NULL;
-
-	// Assume the latest script function is the output source
-	for ( int i = vm->_callsstacksize; i-- > 0; )
-	{
-		if ( sq_type(vm->_callsstack[i]._closure) == OT_CLOSURE )
-		{
-			ci = vm->_callsstack + i;
-			break;
-		}
-	}
-
-	SendEvent_OutputStdOut( sqstring_t( buf, len ), ci );
-}
-
 
 SQInteger SQDebugServer::SQDefineClass( HSQUIRRELVM vm )
 {
@@ -20422,15 +20837,11 @@ SQInteger SQDebugServer::SQEval( HSQUIRRELVM vm )
 
 		SQObjectPtr value;
 
-#ifdef SQUNICODE
-		unsigned int size = UTF8Length( _string(expression)->_val, _string(expression)->_len ) + 1;
+		unsigned int size = scstombslen( _string(expression)->_val, _string(expression)->_len ) + 1;
 		stringbufext_t tmpbuf( dbg->m_ReadBuf.Alloc( size ), size );
 		tmpbuf.Puts( _string(expression) );
 		tmpbuf.Term();
 		string_t tmp = tmpbuf;
-#else
-		string_t tmp = _string(expression);
-#endif
 
 		// return string if expression has format specifiers
 		int flags = ParseFormatSpecifiers( tmp );
@@ -20438,9 +20849,7 @@ SQInteger SQDebugServer::SQEval( HSQUIRRELVM vm )
 		CCompiler c( tmp );
 		ECompileReturnCode cres = c.Evaluate( dbg, vm, vm->ci - 1 - repl - vm->_callsstack, value );
 
-#ifdef SQUNICODE
 		dbg->m_ReadBuf.ReleaseTop();
-#endif
 
 		switch ( cres )
 		{
@@ -20487,9 +20896,22 @@ SQInteger SQDebugServer::SQEval( HSQUIRRELVM vm )
 }
 #endif
 
-#ifndef SQDBG_PRINTBUF_SIZE
-#define SQDBG_PRINTBUF_SIZE 2048
-#endif
+const SQVM::CallInfo *SQDebugServer::GetCurrentScriptSource( HSQUIRRELVM vm )
+{
+	const SQVM::CallInfo *ci = NULL;
+
+	// Assume the latest script function is the output source
+	for ( int i = vm->_callsstacksize; i-- > 0; )
+	{
+		if ( sq_type(vm->_callsstack[i]._closure) == OT_CLOSURE )
+		{
+			ci = vm->_callsstack + i;
+			break;
+		}
+	}
+
+	return ci;
+}
 
 void SQDebugServer::SQPrint( HSQUIRRELVM vm, const SQChar *fmt, ... )
 {
@@ -20497,22 +20919,10 @@ void SQDebugServer::SQPrint( HSQUIRRELVM vm, const SQChar *fmt, ... )
 	Assert( dbg && dbg->IsClientConnected() );
 	if ( dbg )
 	{
-		SQChar buf[ SQDBG_PRINTBUF_SIZE ];
 		va_list va;
 		va_start( va, fmt );
-		int len = scvsprintf( buf, SQDBG_PRINTBUF_SIZE, fmt, va );
+		dbg->SQPrintAtFrameV( dbg->m_Print, vm, dbg->GetCurrentScriptSource( vm ), fmt, va );
 		va_end( va );
-
-		if ( len < 0 || len > SQDBG_PRINTBUF_SIZE-1 )
-		{
-			len = SQDBG_PRINTBUF_SIZE-1;
-#if defined(_MSC_VER) && _MSC_VER < 1900
-			buf[len] = 0;
-#endif
-		}
-
-		_OutputDebugString( buf );
-		dbg->OnSQPrint( vm, buf, len );
 	}
 }
 
@@ -20522,57 +20932,49 @@ void SQDebugServer::SQError( HSQUIRRELVM vm, const SQChar *fmt, ... )
 	Assert( dbg && dbg->IsClientConnected() );
 	if ( dbg )
 	{
-		SQChar buf[ SQDBG_PRINTBUF_SIZE ];
 		va_list va;
 		va_start( va, fmt );
-		int len = scvsprintf( buf, SQDBG_PRINTBUF_SIZE, fmt, va );
+		dbg->SQPrintAtFrameV( dbg->m_PrintError, vm, dbg->GetCurrentScriptSource( vm ), fmt, va );
 		va_end( va );
-
-		if ( len < 0 || len > SQDBG_PRINTBUF_SIZE-1 )
-		{
-			len = SQDBG_PRINTBUF_SIZE-1;
-#if defined(_MSC_VER) && _MSC_VER < 1900
-			buf[len] = 0;
-#endif
-		}
-
-		_OutputDebugString( buf );
-		dbg->OnSQError( vm, buf, len );
 	}
 }
 
 #ifndef SQDBG_CALL_DEFAULT_ERROR_HANDLER
-void SQDebugServer::SQErrorAtFrame( HSQUIRRELVM vm, const SQVM::CallInfo *ci, const SQChar *fmt, ... )
+void SQDebugServer::SQErrorNoFrame( HSQUIRRELVM vm, const SQChar *fmt, ... )
 {
-	SQDebugServer *dbg = sqdbg_get_debugger( vm );
-	Assert( dbg && dbg->IsClientConnected() );
-	if ( dbg )
-	{
-		SQChar buf[ SQDBG_PRINTBUF_SIZE ];
-		va_list va;
-		va_start( va, fmt );
-		int len = scvsprintf( buf, SQDBG_PRINTBUF_SIZE, fmt, va );
-		va_end( va );
-
-		if ( len < 0 || len > SQDBG_PRINTBUF_SIZE-1 )
-		{
-			len = SQDBG_PRINTBUF_SIZE-1;
-#if defined(_MSC_VER) && _MSC_VER < 1900
-			buf[len] = 0;
-#endif
-		}
-
-		_OutputDebugString( buf );
-		dbg->m_PrintError( vm, buf );
-		dbg->SendEvent_OutputStdOut( sqstring_t( buf, len ), ci );
-	}
+	va_list va;
+	va_start( va, fmt );
+	this->SQPrintAtFrameV( this->m_PrintError, vm, NULL, fmt, va );
+	va_end( va );
 }
 #endif
+
+#ifndef SQDBG_PRINTBUF_SIZE
+#define SQDBG_PRINTBUF_SIZE 2048
+#endif
+
+void SQDebugServer::SQPrintAtFrameV( SQPRINTFUNCTION fn,
+		HSQUIRRELVM vm, const SQVM::CallInfo *ci, const SQChar *fmt, va_list va )
+{
+	SQChar buf[ SQDBG_PRINTBUF_SIZE ];
+	int len = scvsprintf( buf, SQDBG_PRINTBUF_SIZE, fmt, va );
+	if ( len < 0 || len > SQDBG_PRINTBUF_SIZE-1 )
+	{
+		len = SQDBG_PRINTBUF_SIZE-1;
+#if defined(_MSC_VER) && _MSC_VER < 1900
+		buf[len] = 0;
+#endif
+	}
+
+	_OutputDebugString( buf );
+	fn( vm, _SC(FMT_STR), buf );
+	this->SendEvent_OutputStdOut( sqstring_t( buf, len ), ci );
+}
 
 SQInteger SQDebugServer::SQErrorHandler( HSQUIRRELVM vm )
 {
 	SQDebugServer *dbg = sqdbg_get_debugger( vm );
-	if ( dbg && dbg->IsClientConnected() )
+	if ( dbg )
 	{
 		dbg->ErrorHandler( vm );
 	}
@@ -20691,6 +21093,47 @@ SQInteger SQDebugServer::SQProfHook( HSQUIRRELVM vm )
 #endif
 #endif
 
+#if 0
+// For debug purposes
+void sqdbg_dump_stack( HSQUIRRELVM vm,
+			void (*callback)(
+				const char *nameptr, int namelen,
+				const char *typeptr, int typelen,
+				const char *valueptr, int valuelen ) )
+{
+	HSQDEBUGSERVER dbg = sqdbg_get_debugger( vm );
+	if ( !dbg )
+		return;
+
+	CScratch_Restore_Auto _sr( &dbg->m_Scratch );
+	CBufTmpCache _bufcache( &dbg->m_SendBuf );
+	{
+		wjson_table_t body( dbg->m_SendBuf );
+		wjson_array_t variables = body.SetArray( "" );
+		dbg->DumpStack( vm, -1, 0, variables );
+	}
+
+	json_table_t table;
+	JSONParser parser( &dbg->m_Scratch, dbg->m_SendBuf.Base(), dbg->m_SendBuf.Size(), &table );
+	Assert( !parser.GetError() );
+
+	json_array_t *a;
+	Verify( table.GetArray( "", &a ) );
+
+	for ( int i = 0; i < a->Size(); i++ )
+	{
+		json_table_t *elem;
+		Verify( a->GetTable( i, &elem ) );
+
+		string_t name, type, value;
+		Verify( elem->GetString( "name", &name ) );
+		Verify( elem->GetString( "type", &type ) );
+		Verify( elem->GetString( "value", &value ) );
+		(*callback)( name.ptr, name.len, type.ptr, type.len, value.ptr, value.len );
+	}
+}
+#endif
+
 #define SQDBG_SV_TAG "__sqdbg__"
 
 struct CDebuggerScriptRef
@@ -20729,7 +21172,7 @@ HSQDEBUGSERVER sqdbg_get_debugger( HSQUIRRELVM vm )
 {
 	// Use SQTable_Get to reduce hot path with stack operations
 	SQObjectPtr ref;
-	if ( SQTable_Get( _table(_ss(vm)->_registry), _SC(SQDBG_SV_TAG), ref ) )
+	if ( SQTable_Get( SS_NOGC(_ss(vm),) _table(_ss(vm)->_registry), _SC(SQDBG_SV_TAG), ref ) )
 	{
 		Assert( sq_type(ref) == OT_USERDATA );
 		return ((CDebuggerScriptRef*)_userdataval(ref))->dbg;
@@ -20740,7 +21183,7 @@ HSQDEBUGSERVER sqdbg_get_debugger( HSQUIRRELVM vm )
 
 void sqdbg_get_debugger_ref( HSQUIRRELVM vm, SQObjectPtr &ref )
 {
-	SQTable_Get( _table(_ss(vm)->_registry), _SC(SQDBG_SV_TAG), ref );
+	SQTable_Get( SS_NOGC(_ss(vm),) _table(_ss(vm)->_registry), _SC(SQDBG_SV_TAG), ref );
 	Assert( sq_type(ref) == OT_NULL || sq_type(ref) == OT_USERDATA );
 }
 
@@ -20786,7 +21229,27 @@ HSQDEBUGSERVER sqdbg_attach_debugger( HSQUIRRELVM vm )
 		ref = (CDebuggerScriptRef*)_userdataval(o);
 
 		if ( ref->dbg )
+		{
+			// Update print funcs
+#if SQUIRREL_VERSION_NUMBER >= 300
+			ref->dbg->m_Print = sq_getprintfunc( ref->dbg->m_pRootVM );
+			ref->dbg->m_PrintError = sq_geterrorfunc( ref->dbg->m_pRootVM );
+#else
+			ref->dbg->m_Print = sq_getprintfunc( ref->dbg->m_pRootVM );
+			ref->dbg->m_PrintError = ref->dbg->m_Print;
+#endif
+			if ( sq_type(ref->dbg->m_ErrorHandler) != OT_NULL )
+				sq_release( ref->dbg->m_pRootVM, &ref->dbg->m_ErrorHandler );
+
+			ref->dbg->m_ErrorHandler = ref->dbg->m_pRootVM->_errorhandler;
+
+			if ( sq_type(ref->dbg->m_ErrorHandler) != OT_NULL )
+				sq_addref( ref->dbg->m_pRootVM, &ref->dbg->m_ErrorHandler );
+
+			Assert( ref->dbg->m_Print && ref->dbg->m_PrintError );
+
 			return ref->dbg;
+		}
 	}
 
 	if ( !ref )

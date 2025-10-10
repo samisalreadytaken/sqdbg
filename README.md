@@ -119,30 +119,29 @@ Debugger specific features that are outside of the _Debug Adapter Protocol_.
 
 Append a flag on a watch or tracepoint expression after a comma (`,`) to format the variable.
 
-Specifier  | Format       | Example value             | Result
------------|--------------|---------------------------|--------------
-`x`        | hexadecimal  | 221                       | 0xdd
-`X`        | hexadecimal  | 221                       | 0xDD
-`xb`       | hexadecimal  | 221                       | dd
-`Xb`       | hexadecimal  | 221                       | DD
-`x0`       | hexadecimal  | 221                       | 0x000000dd
-`x0b`      | hexadecimal  | 221                       | 000000dd
-`X0`       | hexadecimal  | 221                       | 0x000000DD
-`X0b`      | hexadecimal  | 221                       | 000000DD
-`b`        | binary       | 221                       | 0b11011101
-`bb`       | binary       | 221                       | 11011101
-`b0`       | binary       | 221                       | 0b00000000000000000000000011011101
-`b0b`      | binary       | 221                       | 00000000000000000000000011011101
-`o`        | octal        | 221                       | 0335
-`d`        | decimal      | 0xdd                      | 221
-`c`        | character    | 0x41                      | 65 'A'
-`f`        | float        | FLT\_MAX                  | 340282346638528859811704183484516925440.000000
-`e`        | scientific   | 1250000.0                 | 1.250000e+06
-`g`        | flt./sci.    | 1250000.0                 | 1.25e+06
-`na`       | no address   | 0x010C5F20 {x = 0, y = 1} | x = 0, y = 1
-`l`        | list members | 0x010C5F20 {size=4}       | 0x010C5F20 [26500, 29358, 15724, 26962]
-`lna`      | list members, no address              | 0x010C5F20 {size=4}       | [26500, 29358, 15724, 26962]
-`lnax`     | list members, no address, hexadecimal | 0x010C5F20 {size=4}       | [0x6784, 0x72ae, 0x3d6c, 0x6952]
+Specifier  | Format                                  | Example value             | Result
+-----------|---------------------------------------  |---------------------------|--------------
+`x`        | hexadecimal                             | 221                       | 0xdd
+`X`        | hexadecimal (uppercase)                 | 221                       | 0xDD
+`xb`       | hexadecimal (no prefix)                 | 221                       | dd
+`x0`       | hexadecimal (padded)                    | 221                       | 0x000000dd
+`X0b`      | hexadecimal (uppercase, pad, no prefix) | 221                       | 000000DD
+`b`        | binary                                  | 221                       | 0b11011101
+`bb`       | binary (no prefix)                      | 221                       | 11011101
+`b0`       | binary (padded)                         | 221                       | 0b00000000000000000000000011011101
+`b0b`      | binary (padded, no prefix)              | 221                       | 00000000000000000000000011011101
+`o`        | octal                                   | 221                       | 0335
+`d`        | decimal                                 | 0xdd                      | 221
+`dx`       | interpret float as integer (hexadecimal)| 1.0                       | 0x3f800000
+`c`        | character                               | 'A'                       | 65 'A'
+`cx`       | character (hexadecimal)                 | 'A'                       | 0x41 'A'
+`f`        | float                                   | FLT\_MAX                  | 340282346638528859811704183484516925440.000000
+`e`        | float (scientific)                      | 1250000.0                 | 1.250000e+06
+`g`        | float/scientific                        | 1250000.0                 | 1.25e+06
+`na`       | no address                              | 0x010C5F20 {x = 0, y = 1} | x = 0, y = 1
+`l`        | list members                            | 0x010C5F20 {size=4}       | 0x010C5F20 [26500, 29358, 15724, 26962]
+`lna`      | list members, no address                | 0x010C5F20 {size=4}       | [26500, 29358, 15724, 26962]
+`lnax`     | list members, no address, hexadecimal   | 0x010C5F20 {size=4}       | [0x6784, 0x72ae, 0x3d6c, 0x6952]
 
 ### Watch scope locks
 
@@ -155,9 +154,10 @@ Available in watch and tracepoint expressions and `sqdbg_eval` script function.
 Virtual members and user defined custom class members can be accessed.
 
 ```
-local arr = [];
+local arr;
+sqdbg_eval("arr = []");
 local refs = sqdbg_eval("arr.$refs");     // 1
-local str = sqdbg_eval("refs <<= 4,x");   // "0x10"
+local str = sqdbg_eval("refs << 4,x");    // "0x10"
 ```
 
 Reference counted Squirrel objects can be tracked by their addresses with the `*` operator.
@@ -173,7 +173,7 @@ arr == *0x010C5F20       : (bool)    : true
 (*0x010C5F20).$size      : (integer) : 2
 ```
 
-Available special watch expression keywords: `$function`, `$caller`, `$stack`
+Available special watch expression keywords: `$function`, `$caller`, `$stack`, `$breakpoints`
 
 ### Function breakpoints
 
@@ -503,6 +503,10 @@ Adding named function breakpoints requires the desired functions to be compiled 
 ### Special accessors
 
 Use the keywords `__this`, `__vargv`, `__vargc` in REPL and breakpoint conditions to access current environment and the local vargv respectively. Using `this` and `vargv` in watch and tracepoint expressions will work fine.
+
+### Compiler execution
+
+Input to sqdbg compiler (watch/tracepoint expressions, REPL code completion, `sqdbg_eval` function) is executed as it is parsed. For example, the code `fn()....++` will execute the function call `fn()` before parsing the invalid syntax.
 
 ### Data breakpoints
 

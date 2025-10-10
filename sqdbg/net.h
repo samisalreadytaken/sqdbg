@@ -37,7 +37,9 @@
 		}
 	#endif
 
-	#pragma comment(lib, "Ws2_32.lib")
+	#ifdef _MSC_VER
+		#pragma comment(lib, "Ws2_32.lib")
+	#endif
 
 	#undef RegisterClass
 	#undef SendMessage
@@ -472,11 +474,14 @@ private:
 	char *m_pRecvBufPtr;
 	char m_pRecvBuf[ SQDBG_NET_BUF_SIZE ];
 
-	bool m_bWSAInit;
-
 public:
 	const char *m_pszLastMsgFmt;
 	const char *m_pszLastMsg;
+
+#ifdef _WIN32
+private:
+	bool m_bWSAInit;
+#endif
 
 public:
 	bool IsListening()
@@ -839,8 +844,10 @@ public:
 	CServerSocket() :
 		m_Socket( INVALID_SOCKET ),
 		m_ServerSocket( INVALID_SOCKET ),
-		m_pRecvBufPtr( m_pRecvBuf ),
-		m_bWSAInit( false )
+		m_pRecvBufPtr( m_pRecvBuf )
+#ifdef _WIN32
+		, m_bWSAInit( false )
+#endif
 	{
 		STATIC_ASSERT( sizeof(m_pRecvBuf) <= ( 1 << ( sizeof(CMessagePool::message_t::len) * 8 ) ) );
 	}
