@@ -6,10 +6,6 @@
 #ifndef SQDBG_JSON_H
 #define SQDBG_JSON_H
 
-// Most messages are going to require less than 256 bytes,
-// only approaching 1024 on large breakpoint requests
-#define JSON_SCRATCH_CHUNK_SIZE 1024
-
 typedef enum
 {
 	JSON_NULL			= 0x0000,
@@ -62,12 +58,12 @@ class json_array_t
 {
 public:
 	const char *m_pBase;
-	CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
+	CScratch< true > *m_Allocator;
 	int *m_Elements;
 	unsigned short m_nElementCount;
 	unsigned short m_nElementsSize;
 
-	void Init( const char *base, CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *allocator )
+	void Init( const char *base, CScratch< true > *allocator )
 	{
 		m_pBase = base;
 		m_Allocator = allocator;
@@ -138,12 +134,12 @@ class json_table_t
 {
 public:
 	const char *m_pBase;
-	CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
+	CScratch< true > *m_Allocator;
 	int *m_Elements;
 	unsigned short m_nElementCount;
 	unsigned short m_nElementsSize;
 
-	void Init( const char *base, CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *allocator )
+	void Init( const char *base, CScratch< true > *allocator )
 	{
 		m_pBase = base;
 		m_Allocator = allocator;
@@ -800,7 +796,7 @@ private:
 	char *m_cur;
 	char *m_end;
 	char *m_start;
-	CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *m_Allocator;
+	CScratch< true > *m_Allocator;
 	char *m_error;
 
 	enum
@@ -817,7 +813,7 @@ private:
 	};
 
 public:
-	JSONParser( CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *allocator, char *ptr, int len, json_table_t *pTable ) :
+	JSONParser( CScratch< true > *allocator, char *ptr, int len, json_table_t *pTable ) :
 		m_cur( ptr ),
 		m_end( ptr + len + 1 ),
 		m_start( ptr ),

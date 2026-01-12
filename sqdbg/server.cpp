@@ -2494,10 +2494,9 @@ private:
 	CFilePathMap m_FilePathMap;
 	vector< script_t > m_Scripts;
 
+public:
 	CBuffer m_SendBuf;
-	CScratch< true, JSON_SCRATCH_CHUNK_SIZE > m_ReadBuf;
-	CMemory m_Scratch;
-	CMemory m_VarMemberCache;
+	CScratch< true > m_Scratch;
 	CScratch< false > m_Strings;
 
 	CServerSocket m_Server;
@@ -2505,14 +2504,12 @@ private:
 public:
 	char *ScratchPad( unsigned int size )
 	{
-		m_Scratch.Ensure( size );
-		return m_Scratch.Base();
+		return m_Scratch.Alloc( size );
 	}
 
 	stringbufext_t ScratchPadBuf( unsigned int size )
 	{
-		m_Scratch.Ensure( size );
-		return { m_Scratch.Base(), m_Scratch.Base() ? size : 0 };
+		return { m_Scratch.Alloc( size ), size };
 	}
 
 public:
@@ -3083,6 +3080,8 @@ inline SQString *CreateSQString( SQDebugServer *dbg, const string_t &str )
 {
 #ifdef SQUNICODE
 	unsigned int len = SQUnicodeLength( str.ptr, str.len ) + 1;
+
+	CScratch_Restore_Auto _sr( &dbg->m_Scratch );
 	SQChar *tmp = (SQChar*)dbg->ScratchPad( sq_rsl(len) );
 
 	if ( !tmp )
@@ -3101,6 +3100,8 @@ inline bool SQTable_Get( SQDebugServer *dbg, SQTable *table, const string_t &key
 {
 #ifdef SQUNICODE
 	unsigned int len = SQUnicodeLength( key.ptr, key.len ) + 1;
+
+	CScratch_Restore_Auto _sr( &dbg->m_Scratch );
 	SQChar *tmp = (SQChar*)dbg->ScratchPad( sq_rsl(len) );
 
 	if ( !tmp )
@@ -3472,10 +3473,8 @@ void SQDebugServer::Shutdown()
 	m_FrameIDs.Purge();
 	m_FilePathMap.Clear( &m_Strings );
 
-	m_SendBuf.Purge();
-	m_ReadBuf.Free();
+	m_SendBuf.Free();
 	m_Scratch.Free();
-	m_VarMemberCache.Free();
 	m_Strings.Free();
 
 	sq_release( m_pRootVM, &m_EnvGetVal );
@@ -3563,10 +3562,8 @@ void SQDebugServer::DisconnectClient()
 	m_Breakpoints.Purge();
 	m_DataWatches.Purge();
 
-	m_SendBuf.Purge();
-	m_ReadBuf.Free();
+	m_SendBuf.Free();
 	m_Scratch.Free();
-	m_VarMemberCache.Free();
 
 	ClearEnvDelegate( m_EnvGetVal );
 
@@ -3640,8 +3637,10 @@ void SQDebugServer::Frame()
 
 void SQDebugServer::OnMessageReceived( char *ptr, int len )
 {
+	CScratch_Restore_Auto _sr( &m_Scratch );
+
 	json_table_t table;
-	JSONParser parser( &m_ReadBuf, ptr, len, &table );
+	JSONParser parser( &m_Scratch, ptr, len, &table );
 
 	if ( parser.GetError() )
 	{
@@ -3686,8 +3685,6 @@ void SQDebugServer::OnMessageReceived( char *ptr, int len )
 		AssertClientMsg1( 0, "Invalid DAP type '%s'", type.ptr );
 		DisconnectClient();
 	}
-
-	m_ReadBuf.Release();
 }
 
 void SQDebugServer::ProcessRequest( const json_table_t &table, int seq )
@@ -4103,6 +4100,8 @@ void SQDebugServer::OnScriptCompile( const SQChar *script, unsigned int scriptle
 
 #ifdef SQUNICODE
 	unsigned int size = UTF8Length( sourcename, sourcenamelen );
+
+	CScratch_Restore_Auto _sr( &m_Scratch );
 	stringbufext_t source = ScratchPadBuf( size );
 	source.Puts( { sourcename, sourcenamelen } );
 #else
@@ -4246,6 +4245,7 @@ void SQDebugServer::SetSource( wjson_table_t &source, SQString *sourcename )
 #endif
 
 #ifdef SQUNICODE
+	CScratch_Restore_Auto _sr( &m_Scratch );
 	stringbufext_t strName = ScratchPadBuf( UTF8Length( srcname.ptr, srcname.len ) );
 	strName.Puts( srcname );
 
@@ -4580,13 +4580,12 @@ void SQDebugServer::OnRequest_DataBreakpointInfo( const json_table_t &arguments,
 				!name.IsEqualTo( INTERNAL_TAG("state") ) )
 		{
 			// don't modify name in GetObj
-			stringbufext_t tmpbuf( m_ReadBuf.Alloc( name.len ), name.len );
+			CScratch_Restore_Auto _sr( &m_Scratch );
+			stringbufext_t tmpbuf = ScratchPadBuf( name.len );
 			tmpbuf.Puts( name );
 			string_t tmp = tmpbuf;
 
 			bool test = !GetObj_VarRef( ref, tmp, obj, value );
-
-			m_ReadBuf.ReleaseTop();
 
 			if ( test )
 			{
@@ -4627,14 +4626,13 @@ void SQDebugServer::OnRequest_DataBreakpointInfo( const json_table_t &arguments,
 	{
 #ifndef SQDBG_DISABLE_COMPILER
 		// don't modify name in CCompiler::ParseString
-		stringbufext_t tmpbuf( m_ReadBuf.Alloc( name.len + 1 ), name.len + 1 );
+		CScratch_Restore_Auto _sr( &m_Scratch );
+		stringbufext_t tmpbuf = ScratchPadBuf( name.len + 1 );
 		tmpbuf.Puts( name );
 		tmpbuf.Term();
 		string_t tmp = tmpbuf;
 
 		ECompileReturnCode r = Evaluate( tmp, m_pCurVM, m_pCurVM->ci, value, obj );
-
-		m_ReadBuf.ReleaseTop();
 
 		// Check value again to see if the compiled expression was really a reference
 		SQObjectPtr val;
@@ -4773,13 +4771,12 @@ int SQDebugServer::AddDataBreakpoint( HSQUIRRELVM vm, const SQVM::CallInfo *ci,
 		else
 		{
 			// don't modify name in GetObj
-			stringbufext_t tmpbuf( m_ReadBuf.Alloc( name.len ), name.len );
+			CScratch_Restore_Auto _sr( &m_Scratch );
+			stringbufext_t tmpbuf = ScratchPadBuf( name.len );
 			tmpbuf.Puts( name );
 			string_t tmp = tmpbuf;
 
 			bool test = !GetObj_VarRef( ref, tmp, obj, value );
-
-			m_ReadBuf.ReleaseTop();
 
 			if ( test )
 			{
@@ -4801,14 +4798,14 @@ int SQDebugServer::AddDataBreakpoint( HSQUIRRELVM vm, const SQVM::CallInfo *ci,
 		name.len = ( dataId.ptr + dataId.len ) - name.ptr;
 
 		// don't modify name in CCompiler::ParseString
-		stringbufext_t tmpbuf( m_ReadBuf.Alloc( name.len + 1 ), name.len + 1 );
+		CScratch_Restore_Auto _sr( &m_Scratch );
+		stringbufext_t tmpbuf = ScratchPadBuf( name.len + 1 );
 		tmpbuf.Puts( name );
 		tmpbuf.Term();
 		string_t tmp = tmpbuf;
 
 		ECompileReturnCode r = Evaluate( tmp, vm, ci, value, obj );
 
-		m_ReadBuf.ReleaseTop();
 		ConvertPtr( obj );
 
 		// Check value again to see if the compiled expression was really a reference
@@ -5272,6 +5269,8 @@ bool SQDebugServer::CheckDataBreakpoints( HSQUIRRELVM vm )
 				buf.Puts( tmp );
 				buf.Put('`');
 			}
+
+			CScratch_Restore_Auto _sr( &m_Scratch );
 
 			buf.Puts(" changed (");
 			tmp = GetValue( oldvalue );
@@ -6075,8 +6074,7 @@ getfloat:
 			}
 			else
 			{
-				// HACKHACK: Just use an unused buffer
-				stringbufext_t buf( m_ReadBuf.Alloc( size ), size );
+				stringbufext_t buf = ScratchPadBuf( size );
 
 				if ( !( flags & kFS_NoAddr ) )
 				{
@@ -6088,6 +6086,7 @@ getfloat:
 
 				for ( unsigned int i = 0; i < _array(obj)->_values.size(); i++ )
 				{
+					CScratch_Restore_Auto _sr( &m_Scratch );
 					string_t str = GetValue( _array(obj)->_values[i], flags & ~kFS_NoQuote );
 
 					buf.Puts( str );
@@ -6150,8 +6149,7 @@ getfloat:
 			}
 			else
 			{
-				// HACKHACK: Just use an unused buffer
-				stringbufext_t buf( m_ReadBuf.Alloc( size ), size );
+				stringbufext_t buf = ScratchPadBuf( size );
 
 				if ( !( flags & kFS_NoAddr ) )
 				{
@@ -6164,6 +6162,7 @@ getfloat:
 				SQObjectPtr key, val;
 				FOREACH_SQTABLE( _table(obj), key, val )
 				{
+					CScratch_Restore_Auto _sr( &m_Scratch );
 					string_t str = GetValue( key, flags | kFS_NoQuote );
 
 					buf.Puts( str );
@@ -6330,12 +6329,16 @@ void SQDebugServer::JSONSetString( wjson_table_t &elem, const string_t &key, con
 		case OT_INSTANCE:
 		case OT_CLASS:
 process:
+		{
+			CScratch_Restore_Auto _sr( &m_Scratch );
 			elem.SetString( key, GetValue( obj, flags ) );
 			break;
+		}
 		// Cannot contain escapable characters, copy string verbatim to json
 		default:
 conststr:
 		{
+			CScratch_Restore_Auto _sr( &m_Scratch );
 			string_t str = GetValue( obj, flags );
 			conststring_t ret;
 			ret.ptr = str.ptr;
@@ -6459,6 +6462,7 @@ void SQDebugServer::PrintLiteral( const SQFunctionProto *func, int pos, stringbu
 		case OT_NULL:
 		case OT_STRING:
 		{
+			CScratch_Restore_Auto _sr( &m_Scratch );
 			string_t str = GetValue( val );
 
 			if ( str.len > 64 )
@@ -7321,6 +7325,7 @@ bool SQDebugServer::CompileScript( const string_t &script, SQObjectPtr &out )
 	const bool multiline = false;
 	unsigned int size;
 	SQChar *buf, *scratch;
+	CScratch_Restore_Auto _sr( &m_Scratch );
 
 	if ( !multiline )
 	{
@@ -7394,6 +7399,7 @@ bool SQDebugServer::RunScript( HSQUIRRELVM vm, const string_t &script,
 {
 	unsigned int size;
 	SQChar *buf, *scratch;
+	CScratch_Restore_Auto _sr( &m_Scratch );
 
 	if ( !multiline )
 	{
@@ -12390,6 +12396,7 @@ bool SQDebugServer::ArithOp( char op, const SQObjectPtr &lhs, const SQObjectPtr 
 			len = INT_MAX / sizeof(SQChar);
 		}
 
+		CScratch_Restore_Auto _sr( &m_Scratch );
 		SQChar *tmp = (SQChar*)ScratchPad( sq_rsl(len) );
 
 		if ( !tmp )
@@ -12648,6 +12655,8 @@ bool SQDebugServer::GetObj_Var( const SQObjectPtr &var, string_t &expression, bo
 
 #ifdef SQUNICODE
 				int len = sq_rsl( SQUnicodeLength< true >( expression.ptr, expression.len ) + 1 );
+
+				CScratch_Restore_Auto _sr( &m_Scratch );
 				SQChar *tmp = (SQChar*)ScratchPad( len );
 
 				if ( !tmp )
@@ -14513,6 +14522,7 @@ void SQDebugServer::OnRequest_StackTrace( const json_table_t &arguments, int seq
 										case OT_ARRAY:
 										case OT_CLASS:
 										{
+											CScratch_Restore_Auto _sr( &m_Scratch );
 											string_t str = GetValue( val );
 
 											if ( str.len > 32 && sq_type(val) == OT_STRING )
@@ -14677,7 +14687,7 @@ static int _sortkeys( const SQObjectPtr *a, const SQObjectPtr *b )
 	  HasEscapes( _string(key)->_val, _string(key)->_len ) )
 
 static inline void SortKeys( SQTable *table,
-		vector< SQObjectPtr, true > *values,
+		vector_fixed< SQObjectPtr > *values,
 		bool *hasNonStringMembers )
 {
 	bool nsm = false;
@@ -14697,8 +14707,8 @@ static inline void SortKeys( SQTable *table,
 
 static inline void SortKeys( SQClass *pClass,
 		int *nAttributes,
-		vector< SQObjectPtr, true > *values,
-		vector< SQObjectPtr, true > *methods,
+		vector_fixed< SQObjectPtr > *values,
+		vector_fixed< SQObjectPtr > *methods,
 		bool *hasNonStringMembers )
 {
 	bool nsm = false;
@@ -14752,7 +14762,7 @@ static inline void SortKeys( SQClass *pClass,
 }
 
 static inline void SortKeys( SQClass *pClass,
-		vector< SQObjectPtr, true > *values,
+		vector_fixed< SQObjectPtr > *values,
 		bool *hasNonStringMembers )
 {
 	bool nsm = false;
@@ -15129,9 +15139,11 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 
 						Assert( _table(target)->CountUsed() <= INT_MAX );
 
-						m_VarMemberCache.Ensure( _table(target)->CountUsed() * sizeof(SQObjectPtr) );
+						unsigned int size = _table(target)->CountUsed() * sizeof(SQObjectPtr);
 
-						vector< SQObjectPtr, true > keys( m_VarMemberCache );
+						CScratch_Restore_Auto _sr( &m_Scratch );
+						vector_fixed< SQObjectPtr > keys( m_Scratch.Alloc( size ), size );
+
 						SortKeys( _table(target), &keys, &shouldQuoteKeys );
 
 						ref->obj.hasNonStringMembers = shouldQuoteKeys;
@@ -15181,15 +15193,15 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 						Assert( _class(target)->_members );
 						Assert( _class(target)->_members->CountUsed() <= INT_MAX );
 
-						int nMemberCount = _class(target)->_members->CountUsed();
+						unsigned int size = _class(target)->_members->CountUsed() * sizeof(SQObjectPtr);
 
+						CScratch_Restore_Auto _sr( &m_Scratch );
 						// Lazy way to ensure there is enough memory for values & methods
-						m_VarMemberCache.Ensure( nMemberCount * 2 * sizeof(SQObjectPtr) );
+						char *ptr = m_Scratch.Alloc( size * 2 );
 
-						CMemory temp = m_VarMemberCache;
-						temp.memory.ptr += nMemberCount * sizeof(SQObjectPtr);
+						vector_fixed< SQObjectPtr > values( (void*)ptr, size );
+						vector_fixed< SQObjectPtr > methods( (void*)( ptr + size ), size );
 
-						vector< SQObjectPtr, true > values( m_VarMemberCache ), methods( temp );
 						SortKeys( _class(target), &nAttributes, &values, &methods, &shouldQuoteKeys );
 
 						ref->obj.hasNonStringMembers = shouldQuoteKeys;
@@ -15277,9 +15289,11 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 						Assert( base->_members );
 						Assert( base->_members->CountUsed() <= INT_MAX );
 
-						m_VarMemberCache.Ensure( base->_members->CountUsed() * sizeof(SQObjectPtr) );
+						unsigned int size = base->_members->CountUsed() * sizeof(SQObjectPtr);
 
-						vector< SQObjectPtr, true > values( m_VarMemberCache );
+						CScratch_Restore_Auto _sr( &m_Scratch );
+						vector_fixed< SQObjectPtr > values( m_Scratch.Alloc( size ), size );
+
 						SortKeys( base, &values, &shouldQuoteKeys );
 
 						ref->obj.hasNonStringMembers = shouldQuoteKeys;
@@ -16926,6 +16940,7 @@ void SQDebugServer::OnRequest_SetExpression( const json_table_t &arguments, int 
 		}
 #endif
 
+		CScratch_Restore_Auto _sr( &m_Scratch );
 		stringbufext_t buf = ScratchPadBuf( len + 1 );
 
 		buf.Puts( expression );
@@ -18071,7 +18086,10 @@ int SQDebugServer::AddBreakpoint( int line, const string_t &src,
 
 #ifdef SQUNICODE
 	unsigned int size = sq_rsl( SQUnicodeLength( src.ptr, src.len ) );
+
+	CScratch_Restore_Auto _sr( &m_Scratch );
 	SQChar *pSrc = (SQChar*)ScratchPad( size );
+
 	sqstring_t wsrc;
 	wsrc.Assign( pSrc, UTF8ToSQUnicode( pSrc, size, src.ptr, src.len ) );
 
@@ -18128,6 +18146,7 @@ int SQDebugServer::AddFunctionBreakpoint( const string_t &func, const string_t &
 	int funcsize = sq_rsl( SQUnicodeLength( func.ptr, func.len ) );
 	int srcsize = funcsrc.IsEmpty() ? 0 : sq_rsl( SQUnicodeLength( funcsrc.ptr, funcsrc.len ) );
 
+	CScratch_Restore_Auto _sr( &m_Scratch );
 	SQChar *pFunc = (SQChar*)ScratchPad( funcsize + srcsize );
 	SQChar *pSrc = pFunc + funcsize;
 
@@ -18280,7 +18299,10 @@ void SQDebugServer::RemoveBreakpoints( const string_t &source )
 {
 #ifdef SQUNICODE
 	unsigned int size = sq_rsl( SQUnicodeLength( source.ptr, source.len ) );
+
+	CScratch_Restore_Auto _sr( &m_Scratch );
 	SQChar *tmp = (SQChar*)ScratchPad( size );
+
 	sqstring_t src;
 	src.Assign( tmp, UTF8ToSQUnicode( tmp, size, source.ptr, source.len ) );
 #else
@@ -18387,6 +18409,7 @@ void SQDebugServer::DefineClass( SQClass *target, SQTable *params )
 	{
 		if ( sq_type(name) == OT_STRING && _string(name)->_len )
 		{
+			CScratch_Restore_Auto _sr( &m_Scratch );
 			stringbufext_t buf = ScratchPadBuf( 1024 );
 			buf.PutHex( (uintptr_t)target );
 			buf.Put(' ');
@@ -18633,6 +18656,8 @@ sqstring_t SQDebugServer::PrintDisassembly( SQClosure *target, SQChar *scratch, 
 
 			const SQObjectPtr &val = target->_defaultparams[idx];
 			string_t str;
+
+			CScratch_Restore_Auto _sr( &m_Scratch );
 
 			switch ( sq_type(val) )
 			{
@@ -18937,7 +18962,7 @@ sqstring_t SQDebugServer::ProfGets( HSQUIRRELVM vm, SQString *tag, int type )
 	if ( size <= 0 )
 		return { 0, 0 };
 
-	SQChar *buf = _ss(m_pRootVM)->GetScratchPad( sq_rsl(size) );
+	SQChar *buf = (SQChar*)ScratchPad( sq_rsl(size) );
 	int len = pProfiler->Output( tag, type, buf, size );
 	Assert( len >= 0 );
 
@@ -18946,7 +18971,9 @@ sqstring_t SQDebugServer::ProfGets( HSQUIRRELVM vm, SQString *tag, int type )
 
 void SQDebugServer::ProfPrint( HSQUIRRELVM vm, SQString *tag, int type )
 {
+	CScratch_Restore_Auto _sr( &m_Scratch );
 	sqstring_t str = ProfGets( vm, tag, type );
+
 	if ( str.IsEmpty() )
 		return;
 
@@ -19156,24 +19183,18 @@ void SQDebugServer::ErrorHandler( HSQUIRRELVM vm )
 		return;
 
 	string_t err;
-
-	// Custom error handler and PrintStack can reallocate sqdbg scratch buf,
-	// get value when it is needed
-	SQObjectPtr oe;
+	CScratch_Restore_Auto _sr( &m_Scratch );
 
 	if ( sq_gettop( vm ) >= 1 )
 	{
 		HSQOBJECT o;
 		sq_getstackobj( vm, 2, &o );
-		err.ptr = 0;
-		oe = o;
+		err = GetValue( o, kFS_NoQuote );
 	}
 	else
 	{
 		err.Assign( "??" );
 	}
-
-	bool getError = !err.ptr;
 
 	// An error handler is required to detect exceptions.
 	// The downside of calling the default error handler instead of
@@ -19183,18 +19204,12 @@ void SQDebugServer::ErrorHandler( HSQUIRRELVM vm )
 	SQObjectPtr dummy;
 	vm->Call( m_ErrorHandler, 2, vm->_top-2, dummy, SQFalse );
 #else
-	if ( getError )
-		err = GetValue( oe, kFS_NoQuote );
-
 	SQErrorNoFrame( vm, _SC("\nAN ERROR HAS OCCURRED [" FMT_VCSTR "]\n"), err.len, err.ptr );
 	PrintStack( vm );
 #endif
 
 	if ( !IsClientConnected() )
 		return;
-
-	if ( getError )
-		err = GetValue( oe, kFS_NoQuote );
 
 	if ( m_bBreakOnExceptions )
 	{
@@ -19340,8 +19355,7 @@ void SQDebugServer::Continue( HSQUIRRELVM vm )
 
 	ClearEnvDelegate( m_EnvGetVal );
 
-	if ( m_Scratch.Size() > 1024 )
-		m_Scratch.Alloc( 1024 );
+	m_Scratch.ReleaseShrink();
 }
 
 void SQDebugServer::RemoveReturnValues()
@@ -19370,17 +19384,17 @@ int SQDebugServer::EvalAndWriteExpr( HSQUIRRELVM vm, int frame, string_t &expres
 	// value could be holding the only ref to a SQString
 	// which the result string_t will point to
 	SQObjectPtr value;
+	CScratch_Restore_Auto _sr( &m_Scratch );
 
 #ifndef SQDBG_DISABLE_COMPILER
 	// 'expression' is a substring of breakpoint_t::logMessage
 	// don't modify it in CCompiler::ParseString
-	char cpy[512];
-	Assert( expression.len <= sizeof(cpy) );
-	string_t expr;
-	expr.Assign( cpy, expression.len );
-	memcpy( cpy, expression.ptr, expression.len );
+	stringbufext_t tmpbuf = ScratchPadBuf( expression.len + 1 );
+	tmpbuf.Puts( expression );
+	tmpbuf.Term();
+	string_t tmp = tmpbuf;
 
-	ECompileReturnCode cres = Evaluate( expr, vm, frame, value );
+	ECompileReturnCode cres = Evaluate( tmp, vm, frame, value );
 
 	if ( cres == CompileReturnCode_Success )
 #else
@@ -20466,8 +20480,9 @@ SQInteger SQDebugServer::SQPrintDisassembly( HSQUIRRELVM vm )
 			return sq_throwerror( vm, _SC("expected closure") );
 
 		int buflen = dbg->DisassemblyBufLen( _closure(target) );
-		// NOTE: Both sqdbg and sq scratch pads are reused within this function call
-		SQChar *scratch = (SQChar*)sqdbg_malloc( sq_rsl(buflen) );
+
+		CScratch_Restore_Auto _sr( &dbg->m_Scratch );
+		SQChar *scratch = (SQChar*)dbg->ScratchPad( sq_rsl(buflen) );
 		AssertOOM( scratch, sq_rsl(buflen) );
 
 		if ( !scratch )
@@ -20478,8 +20493,6 @@ SQInteger SQDebugServer::SQPrintDisassembly( HSQUIRRELVM vm )
 
 		sqstring_t str = dbg->PrintDisassembly( _closure(target), scratch, sq_rsl(buflen) );
 		sq_pushstring( vm, str.ptr, str.len );
-
-		sqdbg_free( scratch, sq_rsl(buflen) );
 		return 1;
 	}
 
@@ -20632,6 +20645,7 @@ SQInteger SQDebugServer::SQProfGets( HSQUIRRELVM vm )
 		sq_getstackobj( vm, -1, &arg1 );
 
 		sqstring_t str;
+		CScratch_Restore_Auto _sr( &dbg->m_Scratch );
 
 		switch ( sq_type(arg1) )
 		{
@@ -20774,13 +20788,8 @@ SQInteger SQDebugServer::SQAddDataBreakpoint( HSQUIRRELVM vm )
 		if ( sq_type(condition) == OT_STRING )
 			size += scstombslen( _string(condition)->_val, _string(condition)->_len );
 
-		// NOTE: Both sqdbg and sq scratch pads are reused within this function call
-		char *scratch = (char*)dbg->m_ReadBuf.Alloc( size );
-
-		if ( !scratch )
-			size = 0;
-
-		stringbufext_t bufId( scratch, size );
+		CScratch_Restore_Auto _sr( &dbg->m_Scratch );
+		stringbufext_t bufId = dbg->ScratchPadBuf( size );
 		bufId.Put('0');
 		bufId.Puts( _string(expression) );
 
@@ -20803,8 +20812,6 @@ SQInteger SQDebugServer::SQAddDataBreakpoint( HSQUIRRELVM vm )
 			IsEqual( _SC("sqdbg"), _string(_fp(_closure((vm->ci-1)->_closure)->_function)->_sourcename) );
 
 		int id = dbg->AddDataBreakpoint( vm, vm->ci - 1 - repl, bufId, cond, _integer(hits) );
-
-		dbg->m_ReadBuf.ReleaseTop();
 
 		if ( ISVALID_ID(id) )
 		{
@@ -20838,7 +20845,8 @@ SQInteger SQDebugServer::SQEval( HSQUIRRELVM vm )
 		SQObjectPtr value;
 
 		unsigned int size = scstombslen( _string(expression)->_val, _string(expression)->_len ) + 1;
-		stringbufext_t tmpbuf( dbg->m_ReadBuf.Alloc( size ), size );
+		CScratch_Restore _sr = dbg->m_Scratch.Save();
+		stringbufext_t tmpbuf = dbg->ScratchPadBuf( size );
 		tmpbuf.Puts( _string(expression) );
 		tmpbuf.Term();
 		string_t tmp = tmpbuf;
@@ -20849,17 +20857,18 @@ SQInteger SQDebugServer::SQEval( HSQUIRRELVM vm )
 		CCompiler c( tmp );
 		ECompileReturnCode cres = c.Evaluate( dbg, vm, vm->ci - 1 - repl - vm->_callsstack, value );
 
-		dbg->m_ReadBuf.ReleaseTop();
+		dbg->m_Scratch.Restore( _sr );
 
 		switch ( cres )
 		{
 			case CompileReturnCode_Success:
 				if ( flags )
 				{
+					_sr = dbg->m_Scratch.Save();
 					tmp = dbg->GetValue( value, flags );
 #ifdef SQUNICODE
 					unsigned int len = SQUnicodeLength( tmp.ptr, tmp.len );
-					SQChar *pc = (SQChar*)dbg->m_ReadBuf.Alloc( sq_rsl(len) );
+					SQChar *pc = (SQChar*)dbg->ScratchPad( sq_rsl(len) );
 
 					if ( pc )
 					{
@@ -20870,11 +20879,10 @@ SQInteger SQDebugServer::SQEval( HSQUIRRELVM vm )
 					{
 						value = CreateSQString( _ss(vm), _SC(STR_NOMEM) );
 					}
-
-					dbg->m_ReadBuf.ReleaseTop();
 #else
 					value = CreateSQString( _ss(vm), tmp );
 #endif
+					dbg->m_Scratch.Restore( _sr );
 				}
 
 				sq_pushobject( vm, value );

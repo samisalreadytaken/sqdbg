@@ -111,6 +111,12 @@ public:
 	}
 };
 
+struct CScratch_Restore
+{
+	int m_Chunk;
+	int m_Index;
+};
+
 // GCC requires this to be outside of the class
 template < bool S >
 struct _CScratch_members;
@@ -120,18 +126,12 @@ struct _CScratch_members< true >
 {
 	int m_LastFreeChunk;
 	int m_LastFreeIndex;
-	int m_PrevChunk;
-	int m_PrevIndex;
 
 	int LastFreeChunk() { return m_LastFreeChunk; }
 	int LastFreeIndex() { return m_LastFreeIndex; }
-	int PrevChunk() { return m_PrevChunk; }
-	int PrevIndex() { return m_PrevIndex; }
 
 	void SetLastFreeChunk( int i ) { m_LastFreeChunk = i; }
 	void SetLastFreeIndex( int i ) { m_LastFreeIndex = i; }
-	void SetPrevChunk( int i ) { m_PrevChunk = i; }
-	void SetPrevIndex( int i ) { m_PrevIndex = i; }
 };
 
 template <>
@@ -139,20 +139,16 @@ struct _CScratch_members< false >
 {
 	int LastFreeChunk() { return 0; }
 	int LastFreeIndex() { return 0; }
-	int PrevChunk() { return 0; }
-	int PrevIndex() { return 0; }
 
 	void SetLastFreeChunk( int ) {}
 	void SetLastFreeIndex( int ) {}
-	void SetPrevChunk( int ) {}
-	void SetPrevIndex( int ) {}
 };
 
 template< bool SEQUENTIAL, int MEM_CACHE_CHUNKS_ALIGN = 2048 >
 class CScratch
 {
 public:
-	static const int MEM_CACHE_CHUNKSIZE = 4;
+	static const int MEM_CACHE_CHUNKSIZE = sizeof(void*);
 	static const int INVALID_INDEX = 0x80000000;
 
 	struct chunk_t
@@ -226,9 +222,6 @@ public:
 
 				if ( remainingChunks >= requiredChunks )
 				{
-					m.SetPrevChunk( m.LastFreeChunk() );
-					m.SetPrevIndex( m.LastFreeIndex() );
-
 					m.SetLastFreeIndex( msgIdx + requiredChunks );
 					m.SetLastFreeChunk( chunkIdx );
 
@@ -297,7 +290,15 @@ public:
 				chunk->count = ( requiredChunks + ( MEM_CACHE_CHUNKS_ALIGN - 1 ) ) & ~( MEM_CACHE_CHUNKS_ALIGN - 1 );
 				chunk->ptr = (char*)sqdbg_malloc( chunk->count * MEM_CACHE_CHUNKSIZE );
 				AssertOOM( chunk->ptr, chunk->count * MEM_CACHE_CHUNKSIZE );
-				memset( chunk->ptr, 0, chunk->count * MEM_CACHE_CHUNKSIZE );
+
+				if ( chunk->ptr )
+				{
+					memset( chunk->ptr, 0, chunk->count * MEM_CACHE_CHUNKSIZE );
+				}
+				else
+				{
+					return NULL;
+				}
 			}
 
 			Assert( chunkIdx < 0x00007fff );
@@ -358,8 +359,6 @@ public:
 		m_MemChunkCount = 4;
 		m.SetLastFreeChunk( 0 );
 		m.SetLastFreeIndex( 0 );
-		m.SetPrevChunk( 0 );
-		m.SetPrevIndex( 0 );
 	}
 
 	void ReleaseShrink()
@@ -406,8 +405,6 @@ public:
 
 		m.SetLastFreeChunk( 0 );
 		m.SetLastFreeIndex( 0 );
-		m.SetPrevChunk( 0 );
-		m.SetPrevIndex( 0 );
 	}
 
 	void Release()
@@ -431,20 +428,24 @@ public:
 
 		m.SetLastFreeChunk( 0 );
 		m.SetLastFreeIndex( 0 );
-		m.SetPrevChunk( 0 );
-		m.SetPrevIndex( 0 );
 	}
 
-	void ReleaseTop()
+	CScratch_Restore Save()
+	{
+		STATIC_ASSERT( SEQUENTIAL );
+		return { m.LastFreeChunk(), m.LastFreeIndex() };
+	}
+
+	void Restore( CScratch_Restore n )
 	{
 		STATIC_ASSERT( SEQUENTIAL );
 
-		m.SetLastFreeChunk( m.PrevChunk() );
-		m.SetLastFreeIndex( m.PrevIndex() );
+		m.SetLastFreeChunk( n.m_Chunk );
+		m.SetLastFreeIndex( n.m_Index );
 	}
 };
 
-template < typename T, bool bExternalMem = false, class CAllocator = CMemory >
+template < typename T, class CAllocator = CMemory >
 class vector
 {
 public:
@@ -455,23 +456,15 @@ public:
 
 	vector() : base(), size(0)
 	{
-		STATIC_ASSERT( !bExternalMem );
-	}
-
-	vector( CAllocator &a ) : base(a), size(0)
-	{
-		STATIC_ASSERT( bExternalMem );
 	}
 
 	vector( I count ) : base(), size(0)
 	{
-		STATIC_ASSERT( !bExternalMem );
 		base.Alloc( count * sizeof(T) );
 	}
 
 	vector( const vector< T > &src ) : base()
 	{
-		STATIC_ASSERT( !bExternalMem );
 		base.Alloc( src.base.Size() );
 		size = src.size;
 
@@ -486,8 +479,7 @@ public:
 		for ( I i = 0; i < size; i++ )
 			((T&)(base[ i * sizeof(T) ])).~T();
 
-		if ( !bExternalMem )
-			base.Free();
+		base.Free();
 	}
 
 	T &operator[]( I i ) const
@@ -619,6 +611,134 @@ public:
 	}
 };
 
+template < typename T >
+class vector_fixed
+{
+public:
+	typedef unsigned int I;
+
+	char *base;
+	I size;
+	I capacity;
+
+	vector_fixed( void *ptr, I count ) : base((char*)ptr), size(0), capacity(count)
+	{
+		Assert( ptr );
+	}
+
+	~vector_fixed()
+	{
+		Assert( size <= capacity );
+
+		for ( I i = 0; i < size; i++ )
+			((T&)(base[ i * sizeof(T) ])).~T();
+	}
+
+	T &operator[]( I i ) const
+	{
+		Assert( size > 0 );
+		Assert( i >= 0 && i < size );
+		Assert( size <= capacity );
+		return (T&)base[ i * sizeof(T) ];
+	}
+
+	T *Base()
+	{
+		return base;
+	}
+
+	I Size() const
+	{
+		return size;
+	}
+
+	I Capacity() const
+	{
+		return capacity;
+	}
+
+	T &Top() const
+	{
+		Assert( size > 0 );
+		return (T&)base[ ( size - 1 ) * sizeof(T) ];
+	}
+
+	void Pop()
+	{
+		Assert( size > 0 );
+		((T&)base[ --size * sizeof(T) ]).~T();
+	}
+
+	void Append( const T &src )
+	{
+		if ( size == capacity )
+			return;
+
+		size++;
+		new( &base[ ( size - 1 ) * sizeof(T) ] ) T( src );
+	}
+
+	T *Insert( I i )
+	{
+		Assert( i >= 0 && i <= size );
+
+		if ( size == capacity )
+			return NULL;
+
+		size++;
+
+		if ( i != size - 1 )
+		{
+			memmove( &base[ ( i + 1 ) * sizeof(T) ],
+					&base[ i * sizeof(T) ],
+					( size - ( i + 1 ) ) * sizeof(T) );
+		}
+
+		return ( new( &base[ i * sizeof(T) ] ) T() );
+	}
+
+	void Remove( I i )
+	{
+		Assert( size > 0 );
+		Assert( i >= 0 && i < size );
+
+		((T&)base[ i * sizeof(T) ]).~T();
+
+		if ( i != size - 1 )
+		{
+			memmove( &base[ i * sizeof(T) ],
+					&base[ ( i + 1 ) * sizeof(T) ],
+					( size - ( i + 1 ) ) * sizeof(T) );
+		}
+
+		size--;
+	}
+
+	void Clear()
+	{
+		for ( I i = 0; i < size; i++ )
+			((T&)base[ i * sizeof(T) ]).~T();
+
+		size = 0;
+	}
+
+	void Sort( int (*fn)(const T *, const T *) )
+	{
+		if ( size > 1 )
+		{
+			qsort( base, size, sizeof(T), (int (*)(const void *, const void *))fn );
+		}
+	}
+
+	void Purge()
+	{
+		for ( I i = 0; i < size; i++ )
+			((T&)base[ i * sizeof(T) ]).~T();
+
+		size = 0;
+	}
+};
+
 class CBuffer
 {
 public:
@@ -651,7 +771,7 @@ public:
 		base.Alloc( count );
 	}
 
-	void Purge()
+	void Free()
 	{
 		base.Free();
 		size = 0;
@@ -677,6 +797,24 @@ public:
 	{
 		buffer->offset -= size;
 		buffer->size = size;
+	}
+};
+
+class CScratch_Restore_Auto
+{
+public:
+	CScratch< true > *buf;
+	CScratch_Restore sr;
+
+	CScratch_Restore_Auto( CScratch< true > *b )
+	{
+		buf = b;
+		sr = buf->Save();
+	}
+
+	~CScratch_Restore_Auto()
+	{
+		buf->Restore( sr );
 	}
 };
 

@@ -198,7 +198,7 @@ invalid:
 }
 
 #ifdef SQDBG_VALIDATE_SENT_MSG
-inline void DAP_Test( CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *scratch, CBuffer *buffer )
+inline void DAP_Test( CScratch< true > *scratch, CBuffer *buffer )
 {
 	char *pMsg = buffer->Base();
 	int nLength = buffer->Size();
@@ -208,6 +208,8 @@ inline void DAP_Test( CScratch< true, JSON_SCRATCH_CHUNK_SIZE > *scratch, CBuffe
 
 	if ( res )
 	{
+		CScratch_Restore_Auto _sr( scratch );
+
 		json_table_t table;
 		JSONParser parser( scratch, pMsg, nLength, &table );
 
@@ -275,7 +277,7 @@ if ( IsClientConnected() ) \
 \
 	DAP_Serialise( &m_SendBuf ); \
 	Send( m_SendBuf.Base(), m_SendBuf.Size() ); \
-	DAP_Test( &m_ReadBuf, &m_SendBuf ); \
+	DAP_Test( &m_Scratch, &m_SendBuf ); \
 	DAP_Free( &m_SendBuf ); \
 }
 
