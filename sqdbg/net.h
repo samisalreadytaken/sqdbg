@@ -7,8 +7,13 @@
 #define SQDBG_NET_H
 
 #ifdef _WIN32
-	#include <WinSock2.h>
-	#include <WS2tcpip.h>
+	#ifdef __MINGW32__
+		#include <winsock2.h>
+		#include <ws2tcpip.h>
+	#else
+		#include <WinSock2.h>
+		#include <WS2tcpip.h>
+	#endif
 	#ifdef _DEBUG
 		#include <debugapi.h>
 

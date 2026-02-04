@@ -7,7 +7,7 @@
 #define SQDBG_DEBUG_H
 
 #ifdef _DEBUG
-	#ifdef _WIN32
+	#if defined(_WIN32) && !defined(__MINGW32__)
 		#include <crtdbg.h>
 
 		bool __IsDebuggerPresent();
@@ -59,7 +59,10 @@
 				} \
 			} while(0)
 	#else
-		extern "C" int printf(const char *, ...);
+		#ifndef __MINGW32__
+		extern "C"
+		#endif
+		int printf(const char *, ...);
 
 		#define DebuggerBreak() asm("int3")
 
