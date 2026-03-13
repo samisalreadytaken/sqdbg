@@ -15,7 +15,7 @@
 	#define FMT_INT_LEN 20 // -9223372036854775808
 	#define FMT_OCT_LEN 23 // 01777777777777777777777
 
-	#if defined(_WIN32) || SQUIRREL_VERSION_NUMBER > 223
+	#if defined(_WIN32) || SQUIRREL_VERSION_NUMBER >= 300
 		#define FMT_INT "%lld"
 	#else
 		#define FMT_INT "%ld"
@@ -72,14 +72,14 @@ int countdigits( I input );
 template < typename C, typename I >
 int printint( C *buf, int size, I value );
 
-template < bool padding = true, bool prefix = true, bool uppercase = true, typename C, typename I >
-int printhex( C *buf, int size, I value );
+template < bool prefix = true, bool uppercase = true, typename C, typename I >
+int printhex( C *buf, int size, I value, int paddingBits = -1 );
 
 template < typename C, typename I >
 int printoct( C *buf, int size, I value );
 
-template < bool padding, bool prefix = true, typename C, typename I >
-int printbin( C *buf, int size, I value );
+template < bool prefix = true, typename C, typename I >
+int printbin( C *buf, int size, I value, int paddingBits = -1 );
 
 template < typename I >
 bool atoi( string_t str, I *out );
@@ -197,23 +197,31 @@ UNSIGNED_MAKER( SQInteger, SQUnsignedInteger )
 	( ( ( ( (lead) & 0x3FF ) << 10 ) | ( (trail) & 0x3FF ) ) + 0x10000 )
 
 #define UTF16_SURROGATE_FROM_UTF32(dst, cp) \
+do { \
 	(dst)[0] = 0xD800 | ( (cp - 0x10000) >> 10 ); \
-	(dst)[1] = 0xDC00 | ( (cp - 0x10000) & 0x3FF );
+	(dst)[1] = 0xDC00 | ( (cp - 0x10000) & 0x3FF ); \
+} while (0)
 
 #define UTF8_2_FROM_UTF32(mbc, cp) \
+do { \
 	(mbc)[0] = 0xC0 | ( (cp) >> 6 ); \
-	(mbc)[1] = 0x80 | ( (cp) & 0x3F );
+	(mbc)[1] = 0x80 | ( (cp) & 0x3F ); \
+} while (0)
 
 #define UTF8_3_FROM_UTF32(mbc, cp) \
+do { \
 	(mbc)[0] = 0xE0 | ( (cp) >> 12 ); \
 	(mbc)[1] = 0x80 | ( ( (cp) >> 6 ) & 0x3F ); \
-	(mbc)[2] = 0x80 | ( (cp) & 0x3F );
+	(mbc)[2] = 0x80 | ( (cp) & 0x3F ); \
+} while (0)
 
 #define UTF8_4_FROM_UTF32(mbc, cp) \
+do { \
 	(mbc)[0] = 0xF0 | ( (cp) >> 18 ); \
 	(mbc)[1] = 0x80 | ( ( (cp) >> 12 ) & 0x3F ); \
 	(mbc)[2] = 0x80 | ( ( (cp) >> 6 ) & 0x3F ); \
-	(mbc)[3] = 0x80 | ( (cp) & 0x3F );
+	(mbc)[3] = 0x80 | ( (cp) & 0x3F ); \
+} while (0)
 
 typedef enum
 {
@@ -601,14 +609,7 @@ struct stringbufbase_t
 		if ( space < 3 )
 			return;
 
-		if ( padding )
-		{
-			len += printhex< true >( ptr + len, space, value );
-		}
-		else
-		{
-			len += printhex< false >( ptr + len, space, value );
-		}
+		len += printhex( ptr + len, space, value, -(int)padding );
 	}
 };
 
@@ -720,14 +721,28 @@ inline int printint( C *buf, int size, I value )
 	return len;
 }
 
-template < bool padding, bool prefix, bool uppercase, typename C, typename I >
-inline int printhex( C *buf, int size, I value )
+template < bool prefix, bool uppercase, typename C, typename I >
+inline int printhex( C *buf, int size, I value, int paddingBits )
 {
 	STATIC_ASSERT( IS_UNSIGNED( as_unsigned_type( I ) ) );
 	Assert( buf );
 	Assert( size > 0 );
+	Assert( paddingBits >= -1 );
 
-	int len = ( prefix ? 2 : 0 ) + ( padding ? sizeof(I) * 2 : countdigits<16>( cast_unsigned( value ) ) );
+	int len = 0;
+
+	if ( prefix )
+		len += 2;
+
+	if ( paddingBits == -1 )
+	{
+		len += sizeof(I) * 2;
+	}
+	else
+	{
+		int target = countdigits<16>( cast_unsigned( value ) );
+		len += max( target, paddingBits / 4 );
+	}
 
 	if ( len > size )
 		len = size;
@@ -742,7 +757,7 @@ inline int printhex( C *buf, int size, I value )
 	}
 	while ( value );
 
-	if ( padding )
+	if ( paddingBits )
 	{
 		while ( i >= ( prefix ? 2 : 0 ) )
 			buf[i--] = '0';
@@ -792,41 +807,46 @@ inline int printoct( C *buf, int size, I value )
 	return len;
 }
 
-template < bool padding, bool prefix, typename C, typename I >
-inline int printbin( C *buf, int size, I value )
+template < bool prefix, typename C, typename I >
+inline int printbin( C *buf, int size, I value, int paddingBits )
 {
 	STATIC_ASSERT( IS_UNSIGNED( I ) );
 	Assert( buf );
 	Assert( size > 0 );
+	Assert( paddingBits >= -1 );
 
 	int len = 0;
 
 	if ( prefix )
 		len += 2;
 
-	if ( padding )
+	if ( paddingBits == -1 )
 	{
 		len += sizeof(I) * 8;
 	}
 	else
 	{
+		int target;
+
 		// Print at 1, 2, 4 byte boundaries
 		if ( sizeof(I) >= 4 && cast_unsigned( value ) > 0xFFFFFFFF )
 		{
-			len += sizeof(I) * 8;
+			target = sizeof(I) * 8;
 		}
 		else if ( sizeof(I) >= 2 && cast_unsigned( value ) > 0xFFFF )
 		{
-			len += 4 * 8;
+			target = 4 * 8;
 		}
 		else if ( cast_unsigned( value ) > 0xFF )
 		{
-			len += 2 * 8;
+			target = 2 * 8;
 		}
 		else
 		{
-			len += 1 * 8;
+			target = 1 * 8;
 		}
+
+		len += max( target, paddingBits );
 	}
 
 	if ( len > size )
@@ -1136,7 +1156,7 @@ inline unsigned int UTF8ToSQUnicode( SQChar *dst, unsigned int destSize, const c
 				}
 			}
 
-			goto xffff;
+			goto single;
 		}
 		else if ( IN_RANGE( cp, 0xC2, 0xF4 ) )
 		{
@@ -1146,7 +1166,7 @@ inline unsigned int UTF8ToSQUnicode( SQChar *dst, unsigned int destSize, const c
 				{
 					cp = UTF32_FROM_UTF8_2( cp, src[1] );
 					src += 1;
-					goto xffff;
+					goto single;
 				}
 			}
 			else if ( UTF8_3_LEAD(cp) )
@@ -1155,7 +1175,7 @@ inline unsigned int UTF8ToSQUnicode( SQChar *dst, unsigned int destSize, const c
 				{
 					cp = UTF32_FROM_UTF8_3( cp, src[1], src[2] );
 					src += 2;
-					goto xffff;
+					goto single;
 				}
 			}
 			else if ( UTF8_4_LEAD(cp) )
@@ -1164,21 +1184,26 @@ inline unsigned int UTF8ToSQUnicode( SQChar *dst, unsigned int destSize, const c
 				{
 					cp = UTF32_FROM_UTF8_4( cp, src[1], src[2], src[3] );
 					src += 3;
-					goto supplementary;
+					if ( sizeof(SQChar) == 2 )
+					{
+						goto supplementary;
+					}
+					else if ( sizeof(SQChar) == 4 )
+					{
+						goto single;
+					}
+					else UNREACHABLE();
 				}
 			}
 
-			goto xffff;
+			goto single;
 		}
 		else // [0x7F, 0xC2) & (0xF4, 0xFF]
 		{
-			goto xffff;
+			goto single;
 		}
 
-xffff:
-#if WCHAR_SIZE == 4
-supplementary:
-#endif
+single:
 		if ( dst )
 		{
 			if ( sizeof(SQChar) <= destSize )
@@ -1200,30 +1225,31 @@ supplementary:
 
 		continue;
 
-#if WCHAR_SIZE == 2
-supplementary:
-		if ( dst )
+		if ( sizeof(SQChar) == 2 )
 		{
-			if ( sizeof(SQChar) * 2 <= destSize )
+supplementary:
+			if ( dst )
 			{
-				UTF16_SURROGATE_FROM_UTF32( dst, cp );
-				dst += 2;
-				destSize -= sizeof(SQChar) * 2;
-				count += 2;
+				if ( sizeof(SQChar) * 2 <= destSize )
+				{
+					UTF16_SURROGATE_FROM_UTF32( dst, cp );
+					dst += 2;
+					destSize -= sizeof(SQChar) * 2;
+					count += 2;
+				}
+				else
+				{
+					cp = 0xFFFD;
+					goto single;
+				}
 			}
 			else
 			{
-				cp = 0xFFFD;
-				goto xffff;
+				count += 2;
 			}
-		}
-		else
-		{
-			count += 2;
-		}
 
-		continue;
-#endif
+			continue;
+		}
 	}
 
 	return count;
@@ -1402,7 +1428,7 @@ doescape:
 
 						mbc[bytes++] = '\\';
 						mbc[bytes++] = 'u';
-						bytes += printhex< true, false >( mbc + bytes, sizeof(mbc) - bytes, (uint16_t)cp );
+						bytes += printhex< false >( mbc + bytes, sizeof(mbc) - bytes, (uint16_t)cp );
 						goto write;
 					}
 				}
@@ -1442,7 +1468,7 @@ x7ff:
 
 					mbc[bytes++] = '\\';
 					mbc[bytes++] = 'u';
-					bytes += printhex< true, false >( mbc + bytes, sizeof(mbc) - bytes, (uint16_t)cp );
+					bytes += printhex< false >( mbc + bytes, sizeof(mbc) - bytes, (uint16_t)cp );
 					goto write;
 				}
 			}
@@ -1465,14 +1491,14 @@ x7ff:
 
 				mbc[bytes++] = '\\';
 				mbc[bytes++] = 'u';
-				bytes += printhex< true, false >( mbc + bytes, sizeof(mbc) - bytes, s[0] );
+				bytes += printhex< false >( mbc + bytes, sizeof(mbc) - bytes, s[0] );
 
 				if ( escape == kUTFEscapeQuoted )
 					mbc[bytes++] = '\\';
 
 				mbc[bytes++] = '\\';
 				mbc[bytes++] = 'u';
-				bytes += printhex< true, false >( mbc + bytes, sizeof(mbc) - bytes, s[1] );
+				bytes += printhex< false >( mbc + bytes, sizeof(mbc) - bytes, s[1] );
 				goto write;
 			}
 
@@ -1480,6 +1506,7 @@ supplementary:
 			UTF8_4_FROM_UTF32( mbc, cp );
 			bytes = 4;
 		}
+
 write:
 		if ( dst )
 		{

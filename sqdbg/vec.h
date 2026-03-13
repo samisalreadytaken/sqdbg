@@ -492,7 +492,7 @@ public:
 
 	T *Base()
 	{
-		return base.Base();
+		return (T*)base.Base();
 	}
 
 	I Size() const
@@ -531,7 +531,7 @@ public:
 		new( &base[ ( size - 1 ) * sizeof(T) ] ) T( src );
 	}
 
-	T &Insert( I i )
+	T *Insert( I i )
 	{
 		Assert( i >= 0 && i <= size );
 
@@ -545,7 +545,7 @@ public:
 					( size - ( i + 1 ) ) * sizeof(T) );
 		}
 
-		return *( new( &base[ i * sizeof(T) ] ) T() );
+		return ( new( &base[ i * sizeof(T) ] ) T() );
 	}
 
 	void Remove( I i )
@@ -644,7 +644,7 @@ public:
 
 	T *Base()
 	{
-		return base;
+		return (T*)base;
 	}
 
 	I Size() const
@@ -678,12 +678,12 @@ public:
 		new( &base[ ( size - 1 ) * sizeof(T) ] ) T( src );
 	}
 
-	T *Insert( I i )
+	void Insert( I i, const T &src )
 	{
 		Assert( i >= 0 && i <= size );
 
 		if ( size == capacity )
-			return NULL;
+			return;
 
 		size++;
 
@@ -694,7 +694,7 @@ public:
 					( size - ( i + 1 ) ) * sizeof(T) );
 		}
 
-		return ( new( &base[ i * sizeof(T) ] ) T() );
+		new( &base[ i * sizeof(T) ] ) T( src );
 	}
 
 	void Remove( I i )

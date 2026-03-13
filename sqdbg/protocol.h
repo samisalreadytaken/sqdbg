@@ -6,9 +6,9 @@
 #ifndef SQDBG_DAP_H
 #define SQDBG_DAP_H
 
-#define DAP_HEADER_CONTENTLENGTH "Content-Length"
+#define DAP_HEADER_CONTENTLENGTH "Content-Length: "
 #define DAP_HEADER_END "\r\n\r\n"
-#define DAP_HEADER_MAXSIZE ( STRLEN(DAP_HEADER_CONTENTLENGTH ": ") + STRLEN(DAP_HEADER_END) + FMT_UINT32_LEN )
+#define DAP_HEADER_MAXSIZE ( STRLEN(DAP_HEADER_CONTENTLENGTH) + STRLEN(DAP_HEADER_END) + FMT_UINT32_LEN )
 
 inline void DAP_Serialise( CBuffer *buffer )
 {
@@ -35,9 +35,9 @@ inline void DAP_Serialise( CBuffer *buffer )
 		mem[buffer->size++] = ' ';
 	}
 
-	memcpy( mem, DAP_HEADER_CONTENTLENGTH ": ", STRLEN(DAP_HEADER_CONTENTLENGTH ": ") );
+	memcpy( mem, DAP_HEADER_CONTENTLENGTH, STRLEN(DAP_HEADER_CONTENTLENGTH) );
 
-	int idx = STRLEN(DAP_HEADER_CONTENTLENGTH ": ") + digits;
+	int idx = STRLEN(DAP_HEADER_CONTENTLENGTH) + digits;
 
 	for ( int i = idx - 1; contentSize; )
 	{
@@ -119,8 +119,8 @@ inline bool DAP_ReadHeader( char **ppMsg, int *pLength )
 		if ( len == -1 )
 			return false;
 
-		if ( len == (int)STRLEN(DAP_HEADER_CONTENTLENGTH) &&
-				!memcmp( pMsg, DAP_HEADER_CONTENTLENGTH, STRLEN(DAP_HEADER_CONTENTLENGTH) ) )
+		if ( len == (int)STRLEN(DAP_HEADER_CONTENTLENGTH) - 2 &&
+				!memcmp( pMsg, DAP_HEADER_CONTENTLENGTH, STRLEN(DAP_HEADER_CONTENTLENGTH) - 2 ) )
 		{
 			// Duplicate length field
 			if ( nContentLength )
@@ -232,7 +232,8 @@ inline void DAP_Test( CScratch< true > *scratch, CBuffer *buffer )
 		wjson_table_t packet( m_SendBuf ); \
 		packet.SetInt( "seq", _seq ); \
 		packet.SetString( "type", "request" ); \
-		packet.SetString( "command", _cmd );
+		packet.SetString( "command", _cmd ); \
+		(void)0
 
 #define _DAP_START_RESPONSE( _seq, _cmd, _suc ) \
 if ( IsClientConnected() ) \
@@ -243,7 +244,8 @@ if ( IsClientConnected() ) \
 		packet.SetInt( "request_seq", _seq ); \
 		packet.SetString( "type", "response" ); \
 		packet.SetString( "command", _cmd ); \
-		packet.SetBool( "success", _suc );
+		packet.SetBool( "success", _suc ); \
+		(void)0
 
 #define DAP_START_RESPONSE( _seq, _cmd ) \
 		_DAP_START_RESPONSE( _seq, _cmd, true )
@@ -256,6 +258,7 @@ if ( IsClientConnected() ) \
 		wjson_table_t error = body.SetTable( "error" ); \
 		error.SetInt( "id", _id ); \
 		error.SetString( "format", _fmt ); \
+		(void)0
 
 #define DAP_START_EVENT( _seq, _ev ) \
 { \
@@ -264,13 +267,14 @@ if ( IsClientConnected() ) \
 		wjson_table_t packet( m_SendBuf ); \
 		packet.SetInt( "seq", _seq ); \
 		packet.SetString( "type", "event" ); \
-		packet.SetString( "event", _ev );
+		packet.SetString( "event", _ev ); \
+		(void)0
 
 #define DAP_SET( _key, _val ) \
-		packet.Set( _key, _val );
+		packet.Set( _key, _val )
 
 #define DAP_SET_TABLE( _val ) \
-		wjson_table_t _val = packet.SetTable( #_val );
+		wjson_table_t _val = packet.SetTable( #_val )
 
 #define DAP_SEND() \
 	} \
@@ -279,6 +283,7 @@ if ( IsClientConnected() ) \
 	Send( m_SendBuf.Base(), m_SendBuf.Size() ); \
 	DAP_Test( &m_Scratch, &m_SendBuf ); \
 	DAP_Free( &m_SendBuf ); \
-}
+} \
+(void)0
 
 #endif // SQDBG_DAP_H

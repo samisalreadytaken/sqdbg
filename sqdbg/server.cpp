@@ -5,9 +5,9 @@
 // Squirrel Debugger
 //
 
-#define SQDBG_SV_VER 9
+#define SQDBG_SV_VER 10
 
-#include "sqdbg.h"
+#include <sqdbg.h>
 
 #include <limits.h> // INT_MIN
 #include <float.h> // FLT_MAX
@@ -155,18 +155,10 @@ void sqdbg_sleep( int ms )
 
 #ifdef SQUNICODE
 	#ifdef _WIN32
-		#ifndef WCHAR_SIZE
-			#define WCHAR_SIZE 2
-		#endif
 		typedef uint16_t SQUnsignedChar;
 	#else
-		#ifndef WCHAR_SIZE
-			#define WCHAR_SIZE 4
-		#endif
 		typedef unsigned int SQUnsignedChar;
 	#endif
-
-	STATIC_ASSERT( sizeof(SQChar) == WCHAR_SIZE );
 #else
 	typedef unsigned char SQUnsignedChar;
 #endif
@@ -1127,15 +1119,14 @@ public:
 		}
 		else
 		{
-			SQChar tmp[ FMT_PTR_LEN + 1 ];
-			int len = printhex( tmp, FMT_PTR_LEN, (uintptr_t)func );
-			tmp[len] = 0;
+			SQChar tmp[ FMT_PTR_LEN ];
+			printhex( tmp, FMT_PTR_LEN, (uintptr_t)func );
 			tag->funcname = SQString::Create( ss, tmp, FMT_PTR_LEN );
 		}
 
 		if ( funcsrc )
 		{
-			unsigned int len = funcsrc->_len + 1 + FMT_UINT32_LEN + 1;
+			unsigned int len = funcsrc->_len + 1 + FMT_UINT32_LEN;
 			SQChar *tmp = ss->GetScratchPad( sq_rsl(len) );
 			len = funcsrc->_len;
 			memcpy( tmp, funcsrc->_val, sq_rsl(len) );
@@ -1151,7 +1142,6 @@ public:
 				len += printint( tmp + len, FMT_UINT32_LEN, line );
 			}
 
-			tmp[len] = 0;
 			tag->funcsrc = SQString::Create( ss, tmp, len );
 		}
 		else
@@ -2045,23 +2035,24 @@ conststring_t const g_MetaMethodName[ MT_LAST ] =
 
 typedef enum
 {
-	kFS_None			= 0x0000,
-	kFS_Hexadecimal		= 0x0001,
-	kFS_Binary			= 0x0002,
-	kFS_Decimal			= 0x0004,
-	kFS_Float			= 0x0008,
-	kFS_FloatE			= 0x0010,
-	kFS_FloatG			= 0x0020,
-	kFS_Octal			= 0x0040,
-	kFS_Character		= 0x0080,
-	kFS_NoQuote			= 0x0100,
-	kFS_Uppercase		= 0x0200,
-	kFS_Padding			= 0x0400,
-	kFS_NoPrefix		= 0x0800,
-	kFS_KeyVal			= 0x1000,
-	kFS_NoAddr			= 0x2000,
-	kFS_ListMembers		= 0x4000,
-	kFS_Lock			= 0x8000,
+	kFS_None			= 0x00000000,
+	kFS_Hexadecimal		= 0x00000001,
+	kFS_Binary			= 0x00000002,
+	kFS_Decimal			= 0x00000004,
+	kFS_Float			= 0x00000008,
+	kFS_FloatE			= 0x00000010,
+	kFS_FloatG			= 0x00000020,
+	kFS_Octal			= 0x00000040,
+	kFS_Character		= 0x00000080,
+	kFS_NoQuote			= 0x00000100,
+	kFS_Uppercase		= 0x00000200,
+	kFS_Padding			= 0x00000400,
+	kFS_NoPrefix		= 0x00000800,
+	kFS_KeyVal			= 0x00001000,
+	kFS_NoAddr			= 0x00002000,
+	kFS_ListMembers		= 0x00004000,
+	kFS_Lock			= 0x00008000,
+	kFS_MAX				= 0x00FFFFFF,
 } VARSPEC;
 
 struct breakreason_t
@@ -2257,6 +2248,13 @@ struct objref_t
 	SQObjectPtr src;
 	// Let key hold strong ref for compiler newslot target
 	SQObjectPtr key;
+
+	void Reset()
+	{
+		type = INVALID;
+		src.Null();
+		key.Null();
+	}
 };
 
 struct datawatch_t
@@ -2271,7 +2269,7 @@ struct datawatch_t
 
 	int hitsTarget;
 	int hits;
-
+	string_t logMessage;
 	SQObjectPtr condition;
 	unsigned int condtype;
 
@@ -2629,6 +2627,7 @@ private:
 	void OnRequest_Threads( int seq );
 	void OnRequest_StackTrace( const json_table_t &arguments, int seq );
 	void OnRequest_Variables( const json_table_t &arguments, int seq );
+	void OnRequest_Variables_Attributes( varref_t *ref, int flags, int seq );
 	void OnRequest_SetVariable( const json_table_t &arguments, int seq );
 #ifdef SQDBG_SUPPORTS_SET_INSTRUCTION
 	void OnRequest_SetVariable_Instruction( const varref_t *ref, string_t &strName, string_t &strValue, int seq );
@@ -2659,7 +2658,8 @@ private:
 	bool CheckBreakpointCondition( breakpoint_t *bp, HSQUIRRELVM vm, const SQVM::CallInfo *ci );
 
 	int EvalAndWriteExpr( HSQUIRRELVM vm, int frame, string_t &expression, char *buf, int size );
-	void TracePoint( breakpoint_t *bp, HSQUIRRELVM vm, int frame );
+	void TracePoint( string_t &message, int hits, int hitsTarget, HSQUIRRELVM vm, int frame,
+			const SQObjectPtr *oldvalue = NULL, const SQObjectPtr *newvalue = NULL );
 
 	enum
 	{
@@ -2679,8 +2679,8 @@ private:
 
 	bool CompileDataBreakpointCondition( string_t condition, SQObjectPtr &out, unsigned int &type );
 	int AddDataBreakpoint( HSQUIRRELVM vm, const SQVM::CallInfo *ci,
-			const string_t &dataId, const string_t &condition, int hitsTarget );
-	bool CheckDataBreakpoints( HSQUIRRELVM vm );
+			const string_t &dataId, const string_t &condition, int hitsTarget, const string_t &logMessage );
+	bool CheckDataBreakpoints( HSQUIRRELVM vm, int frame );
 	void FreeDataWatch( datawatch_t &dw );
 
 	inline void RemoveAllBreakpoints();
@@ -2771,41 +2771,231 @@ private:
 	void JSONSetString( wjson_table_t &elem, const string_t &key, const SQObject &obj, int flags = 0 );
 
 #ifndef SQDBG_DISABLE_COMPILER
-public:
-	class CCompiler;
 	enum ECompileReturnCode
 	{
 		CompileReturnCode_Success,
+		CompileReturnCode_CallError,
 		// Lookup failed
 		CompileReturnCode_DoesNotExist,
-		CompileReturnCode_CallError,
 		// String/number parsing failed
 		CompileReturnCode_SyntaxError,
-		CompileReturnCode_Fallback,
 		CompileReturnCode_OpFailure,
-		CompileReturnCode_NoValue,
 		// Unrecognised token or token sequences
 		CompileReturnCode_Unsupported,
+		CompileReturnCode_Fallback,
+		CompileReturnCode_NoValue,
 		// Valid but too many parameters in a function call
 		CompileReturnCode_CallBufferFull,
 		// Valid but too many unary operators in a row
 		CompileReturnCode_OpBufferFull,
 	};
 
-	// NOTE: Expression string will be modified if it contains a string with escape characters
-	// This may cause RunExpression fallback after Evaluate to fail
-	// This can be avoided by exiting compilation before escaped strings are parsed
-	// by putting "0," at the beginning of the expression - this is valid squirrel while not allowed here
-	ECompileReturnCode Evaluate( string_t &expression, HSQUIRRELVM vm, int frame,
-			SQObjectPtr &ret );
-	ECompileReturnCode Evaluate( string_t &expression, HSQUIRRELVM vm, const SQVM::CallInfo *ci,
-			SQObjectPtr &ret )
+public:
+	class CCompiler
 	{
-		return Evaluate( expression, vm, ci ? ci - vm->_callsstack : INVALID_FRAME, ret );
-	}
+	public:
+		enum
+		{
+			Err_InvalidToken = -50,
+			Err_Unsupported,
+			Err_Expected,
+			Err_SetFailed,
+			Err_OpFailed,
+			Err_BufLim,
+			Err_IndexNotFound,
+			Err_OIndexNotFound,
+			Err_UnfinishedComment,
+			Err_UnfinishedString,
+			Err_UnfinishedChar,
+			Err_InvalidEscape,
+			Err_InvalidOctalEscape,
+			Err_InvalidXEscape,
+			Err_InvalidU16Escape,
+			Err_InvalidU32Escape,
+			Err_InvalidDecimal,
+			Err_InvalidOctal,
+			Err_InvalidHexadecimal,
+			Err_InvalidBinary,
+			Err_InvalidFloat,
 
-	ECompileReturnCode Evaluate( string_t &expression, HSQUIRRELVM vm, const SQVM::CallInfo *ci,
-			SQObjectPtr &ret, objref_t &obj );
+			Token_End = 1,
+			Token_Ref,
+			Token_Identifier,
+			Token_String,
+			Token_Integer,
+			Token_Float,
+			Token_Null,
+			Token_False,
+			Token_True,
+			Token_This,
+			Token_DoubleColon,
+			Token_Delete,
+#if SQUIRREL_VERSION_NUMBER < 300
+			Token_Parent,
+			Token_Vargv,
+			Token_Vargc,
+#endif
+			Token_File,
+			Token_Line,
+
+			Token_NewSlot,
+			Token_PendingKey,
+			Token_Operator,
+			Token_Value,
+
+			_op = 0xff00,
+
+			// upper 4 bits : precedence
+			// lower 4 bits : unique id
+			Token_Not			= 0x00 | _op,
+			Token_BwNot			= 0x01 | _op,
+			Token_Typeof		= 0x02 | _op,
+			Token_Clone			= 0x03 | _op,
+
+			Token_Increment		= 0x10 | _op,
+			Token_Decrement		= 0x11 | _op,
+
+#ifdef SQDBG_COMPILER_POW_OP
+			Token_Pow			= 0x20 | _op,
+#endif
+			Token_Mul			= 0x21 | _op,
+			Token_Div			= 0x22 | _op,
+			Token_Mod			= 0x23 | _op,
+
+			Token_Add			= 0x30 | _op,
+			Token_Sub			= 0x31 | _op,
+
+			Token_LShift		= 0x40 | _op,
+			Token_RShift		= 0x41 | _op,
+			Token_URShift		= 0x42 | _op,
+
+			Token_Cmp3W			= 0x50 | _op,
+
+			Token_Less			= 0x60 | _op,
+			Token_LessEq		= 0x61 | _op,
+			Token_Greater		= 0x62 | _op,
+			Token_GreaterEq		= 0x63 | _op,
+
+			Token_Eq			= 0x70 | _op,
+			Token_NotEq			= 0x71 | _op,
+
+			Token_BwAnd			= 0x80 | _op,
+			Token_BwXor			= 0x90 | _op,
+			Token_BwOr			= 0xA0 | _op,
+
+			Token_In			= 0xB0 | _op,
+			Token_NotIn			= 0xB1 | _op,
+			Token_InstanceOf	= 0xB2 | _op,
+
+			Token_LogicalAnd	= 0xC0 | _op,
+			Token_LogicalOr		= 0xD0 | _op,
+
+			_assign = 0xff0000,
+
+			Token_Assign,
+			Token_AssignAdd		= _assign | Token_Add,
+			Token_AssignSub		= _assign | Token_Sub,
+			Token_AssignMul		= _assign | Token_Mul,
+			Token_AssignDiv		= _assign | Token_Div,
+			Token_AssignMod		= _assign | Token_Mod,
+			Token_AssignAnd		= _assign | Token_BwAnd,
+			Token_AssignXor		= _assign | Token_BwXor,
+			Token_AssignOr		= _assign | Token_BwOr,
+			Token_AssignLS		= _assign | Token_LShift,
+			Token_AssignRS		= _assign | Token_RShift,
+			Token_AssignURS		= _assign | Token_URShift,
+		};
+
+		struct token_t
+		{
+			token_t() : type(0) {}
+
+			int type;
+			union
+			{
+				string_t _string;
+				SQInteger _integer;
+				SQFloat _float;
+			};
+		};
+
+		struct fileindex_t
+		{
+			int line;
+			int col;
+		};
+
+	private:
+#ifndef SQDBG_COMPILER_MAX_PARAMETER_COUNT
+#define SQDBG_COMPILER_MAX_PARAMETER_COUNT 8
+#endif
+#ifndef SQDBG_COMPILER_MAX_UNARY_STACK
+#define SQDBG_COMPILER_MAX_UNARY_STACK 4
+#endif
+
+		struct callparams_t
+		{
+			SQObjectPtr params[ SQDBG_COMPILER_MAX_PARAMETER_COUNT ];
+			SQObjectPtr func;
+			int paramCount;
+		};
+
+		SQDebugServer *m_dbg;
+		string_t &m_expr;
+		char *m_cur;
+		char *m_end;
+		int m_prevToken;
+
+	public:
+		// To get partial matches for completions request
+		token_t m_lastToken;
+
+		// To add expression watchpoints
+		// Only returns the last checked ref regardless of any other operations that come after
+		// This is fine because adding illogical watchpoints doesn't have significant side effects -
+		// prevention is at the user's discretion
+		objref_t m_lastRef;
+
+		string_t m_lastError;
+
+	public:
+		// Expression has to be NUL terminated
+		// NOTE: Expression string will be modified if it contains a string with escape characters
+		// This may cause RunExpression fallback after Evaluate to fail
+		// This can be avoided by exiting compilation before escaped strings are parsed
+		// by putting "0," at the beginning of the expression - this is valid squirrel while not allowed here
+		CCompiler( SQDebugServer *dbg, string_t &expression );
+		CCompiler( const CCompiler & );
+		CCompiler &operator=( const CCompiler & );
+
+		ECompileReturnCode Evaluate( HSQUIRRELVM vm, int frame, SQObjectPtr &val );
+
+		ECompileReturnCode Evaluate( HSQUIRRELVM vm, const SQVM::CallInfo *ci, SQObjectPtr &val )
+		{
+			return Evaluate( vm, ci ? ci - vm->_callsstack : INVALID_FRAME, val );
+		}
+
+		string_t LastError();
+
+	private:
+		ECompileReturnCode Evaluate( HSQUIRRELVM vm, int frame, SQObjectPtr &val,
+				int closer );
+		void SetError( int err, void *data = NULL );
+		fileindex_t ParserIndex();
+		ECompileReturnCode LexAll( int closer, bool jump = false );
+		static bool IsValue( int token );
+		static bool ExpectsValue( int token );
+		static bool ExpectsIdentifier( int token );
+		static bool BinaryOp( SQDebugServer *dbg,
+				int op, const SQObjectPtr &lhs, const SQObjectPtr &rhs, SQObjectPtr &out );
+		static bool UnaryOp( SQDebugServer *dbg, int op, SQObjectPtr &val );
+		int Next();
+		token_t Lex();
+		bool LexBlockComment();
+		void ParseString( token_t &token );
+		void ParseChar( token_t &token );
+		void ParseNumber( token_t &token );
+	};
 
 private:
 	static inline SQTable *GetDefaultDelegate( HSQUIRRELVM vm, SQObjectType type );
@@ -3079,7 +3269,7 @@ public:
 inline SQString *CreateSQString( SQDebugServer *dbg, const string_t &str )
 {
 #ifdef SQUNICODE
-	unsigned int len = SQUnicodeLength( str.ptr, str.len ) + 1;
+	unsigned int len = SQUnicodeLength( str.ptr, str.len );
 
 	CScratch_Restore_Auto _sr( &dbg->m_Scratch );
 	SQChar *tmp = (SQChar*)dbg->ScratchPad( sq_rsl(len) );
@@ -3088,7 +3278,6 @@ inline SQString *CreateSQString( SQDebugServer *dbg, const string_t &str )
 		return NULL;
 
 	len = UTF8ToSQUnicode( tmp, sq_rsl(len), str.ptr, str.len );
-	tmp[len] = 0;
 
 	return SQString::Create( _ss(dbg->m_pRootVM), tmp, len );
 #else
@@ -3221,7 +3410,7 @@ void SQDebugServer::Attach( HSQUIRRELVM vm )
 		sq_pushobject( m_pRootVM, ref );
 		sq_newclosure( m_pRootVM, &SQDebugServer::SQAddDataBreakpoint, 1 );
 		sq_setnativeclosurename( m_pRootVM, -1, _SC("sqdbg_watch") );
-		sq_setparamscheck( m_pRootVM, -2, _SC(".ssi") );
+		sq_setparamscheck( m_pRootVM, -2, _SC(".ssis") );
 		sq_newslot( m_pRootVM, -3, SQFalse );
 #endif
 
@@ -3299,7 +3488,7 @@ void SQDebugServer::Attach( HSQUIRRELVM vm )
 		sq_newslot( m_pRootVM, -3, SQFalse );
 #endif
 
-		sq_poptop( m_pRootVM );
+		sq_pop( m_pRootVM, 1 );
 	}
 
 #ifndef SQDBG_CALL_DEFAULT_ERROR_HANDLER
@@ -4517,10 +4706,11 @@ void SQDebugServer::OnRequest_SetDataBreakpoints( const json_table_t &arguments,
 		}
 
 		int hitsTarget = 0;
-		string_t dataId, condition, hitCondition;
+		string_t dataId, condition, hitCondition, logMessage;
 
 		bp->GetString( "dataId", &dataId );
 		bp->GetString( "condition", &condition );
+		bp->GetString( "logMessage", &logMessage );
 
 		StripWhitespace( condition );
 
@@ -4532,7 +4722,7 @@ void SQDebugServer::OnRequest_SetDataBreakpoints( const json_table_t &arguments,
 				hitsTarget = 0;
 		}
 
-		int id = AddDataBreakpoint( m_pCurVM, m_pCurVM->ci, dataId, condition, hitsTarget );
+		int id = AddDataBreakpoint( m_pCurVM, m_pCurVM->ci, dataId, condition, hitsTarget, logMessage );
 
 		wjson_table_t obp = obps.AppendTable();
 		obp.SetBool( "verified", ISVALID_ID(id) );
@@ -4632,7 +4822,9 @@ void SQDebugServer::OnRequest_DataBreakpointInfo( const json_table_t &arguments,
 		tmpbuf.Term();
 		string_t tmp = tmpbuf;
 
-		ECompileReturnCode r = Evaluate( tmp, m_pCurVM, m_pCurVM->ci, value, obj );
+		CCompiler c( this, tmp );
+		ECompileReturnCode r = c.Evaluate( m_pCurVM, m_pCurVM->ci, value );
+		obj = c.m_lastRef;
 
 		// Check value again to see if the compiled expression was really a reference
 		SQObjectPtr val;
@@ -4681,7 +4873,7 @@ void SQDebugServer::OnRequest_DataBreakpointInfo( const json_table_t &arguments,
 }
 
 int SQDebugServer::AddDataBreakpoint( HSQUIRRELVM vm, const SQVM::CallInfo *ci,
-		const string_t &dataId, const string_t &strCondition, int hitsTarget )
+		const string_t &dataId, const string_t &strCondition, int hitsTarget, const string_t &logMessage )
 {
 	if ( dataId.len < 2 )
 		return INVALID_ID;
@@ -4804,22 +4996,20 @@ int SQDebugServer::AddDataBreakpoint( HSQUIRRELVM vm, const SQVM::CallInfo *ci,
 		tmpbuf.Term();
 		string_t tmp = tmpbuf;
 
-		ECompileReturnCode r = Evaluate( tmp, vm, ci, value, obj );
+		CCompiler c( this, tmp );
+		ECompileReturnCode r = c.Evaluate( vm, ci, value );
+		obj = c.m_lastRef;
 
 		ConvertPtr( obj );
 
 		// Check value again to see if the compiled expression was really a reference
 		SQObjectPtr val;
 
-		if ( r == CompileReturnCode_DoesNotExist )
-		{
-			vm->_lasterror = CreateSQString( vm, _SC("index does not exist") );
-			return INVALID_ID;
-		}
-
 		if ( r != CompileReturnCode_Success )
 		{
-			vm->_lasterror = CreateSQString( vm, _SC("invalid expression") );
+			if ( r != CompileReturnCode_CallError )
+				vm->_lasterror = CreateSQString( this, c.LastError() );
+
 			return INVALID_ID;
 		}
 
@@ -4909,6 +5099,9 @@ int SQDebugServer::AddDataBreakpoint( HSQUIRRELVM vm, const SQVM::CallInfo *ci,
 	dw.obj = obj;
 	dw.oldvalue = value;
 	dw.hitsTarget = hitsTarget;
+
+	if ( !logMessage.IsEmpty() )
+		CopyString( &m_Strings, logMessage, &dw.logMessage );
 
 	if ( condtype != ECMP_NONE )
 	{
@@ -5143,7 +5336,7 @@ int SQDebugServer::CompareObj( const SQObjectPtr &lhs, const SQObjectPtr &rhs )
 	}
 }
 
-bool SQDebugServer::CheckDataBreakpoints( HSQUIRRELVM vm )
+bool SQDebugServer::CheckDataBreakpoints( HSQUIRRELVM vm, int frame )
 {
 	bool ret = false;
 
@@ -5246,49 +5439,56 @@ bool SQDebugServer::CheckDataBreakpoints( HSQUIRRELVM vm )
 				dw.hits = 0;
 			}
 
-			stringbuf_t< 256 > buf;
-
-			string_t tmp = dw.name;
-			if ( tmp.len > 128 )
-				tmp.len = 128;
-
-			if ( dw.container )
+			if ( dw.logMessage.IsEmpty() )
 			{
-				buf.Put('[');
-				buf.PutHex( (uintptr_t)_refcounted(dw.container->_obj) );
-				buf.Put(' ');
-				buf.Puts( GetType( dw.container->_obj ) );
-				buf.Put(']');
-				buf.Put('-');
-				buf.Put('>');
+				stringbuf_t< 256 > buf;
+
+				string_t tmp = dw.name;
+				if ( tmp.len > 128 )
+					tmp.len = 128;
+
+				if ( dw.container )
+				{
+					buf.Put('[');
+					buf.PutHex( (uintptr_t)_refcounted(dw.container->_obj) );
+					buf.Put(' ');
+					buf.Puts( GetType( dw.container->_obj ) );
+					buf.Put(']');
+					buf.Put('-');
+					buf.Put('>');
+					buf.Puts( tmp );
+				}
+				else
+				{
+					buf.Put('`');
+					buf.Puts( tmp );
+					buf.Put('`');
+				}
+
+				CScratch_Restore_Auto _sr( &m_Scratch );
+
+				buf.Puts(" changed (");
+				tmp = GetValue( oldvalue );
+				if ( tmp.len > 128 )
+					tmp.len = 128;
 				buf.Puts( tmp );
+				buf.Puts(")->(");
+				tmp = GetValue( value );
+				if ( tmp.len > 128 )
+					tmp.len = 128;
+				buf.Puts( tmp );
+				buf.Put(')');
+				buf.Term();
+
+				SQPrint( vm, _SC("(sqdbg) Data breakpoint hit: " FMT_CSTR "\n"), buf.ptr );
+
+				Break( vm, { breakreason_t::DataBreakpoint, buf, dw.id } );
+				ret = true;
 			}
 			else
 			{
-				buf.Put('`');
-				buf.Puts( tmp );
-				buf.Put('`');
+				TracePoint( dw.logMessage, dw.hits, dw.hitsTarget, vm, frame, &oldvalue, &value );
 			}
-
-			CScratch_Restore_Auto _sr( &m_Scratch );
-
-			buf.Puts(" changed (");
-			tmp = GetValue( oldvalue );
-			if ( tmp.len > 128 )
-				tmp.len = 128;
-			buf.Puts( tmp );
-			buf.Puts(")->(");
-			tmp = GetValue( value );
-			if ( tmp.len > 128 )
-				tmp.len = 128;
-			buf.Puts( tmp );
-			buf.Put(')');
-			buf.Term();
-
-			SQPrint( vm, _SC("(sqdbg) Data breakpoint hit: " FMT_CSTR "\n"), buf.ptr );
-
-			Break( vm, { breakreason_t::DataBreakpoint, buf, dw.id } );
-			ret = true;
 		}
 		else
 		{
@@ -5303,33 +5503,40 @@ bool SQDebugServer::CheckDataBreakpoints( HSQUIRRELVM vm )
 			// don't break on stack watch expiration
 			if ( dw.obj.type != objref_t::STACK )
 			{
-				stringbuf_t< 256 > buf;
-
-				if ( dw.container )
+				if ( dw.logMessage.IsEmpty() )
 				{
-					buf.Put('[');
-					buf.PutHex( (uintptr_t)_refcounted(dw.container->_obj) );
-					buf.Put(' ');
-					buf.Puts( GetType( dw.container->_obj ) );
-					buf.Put(']');
-					buf.Put('-');
-					buf.Put('>');
-					buf.Puts( dw.name );
+					stringbuf_t< 256 > buf;
+
+					if ( dw.container )
+					{
+						buf.Put('[');
+						buf.PutHex( (uintptr_t)_refcounted(dw.container->_obj) );
+						buf.Put(' ');
+						buf.Puts( GetType( dw.container->_obj ) );
+						buf.Put(']');
+						buf.Put('-');
+						buf.Put('>');
+						buf.Puts( dw.name );
+					}
+					else
+					{
+						buf.Put('`');
+						buf.Puts( dw.name );
+						buf.Put('`');
+					}
+
+					buf.Puts(" was removed");
+					buf.Term();
+
+					SQPrint( vm, _SC("(sqdbg) Data breakpoint hit: " FMT_CSTR "\n"), buf.ptr );
+
+					Break( vm, { breakreason_t::DataBreakpoint, buf, dw.id } );
+					ret = true;
 				}
 				else
 				{
-					buf.Put('`');
-					buf.Puts( dw.name );
-					buf.Put('`');
+					TracePoint( dw.logMessage, dw.hits, dw.hitsTarget, vm, frame, &dw.oldvalue );
 				}
-
-				buf.Puts(" was removed");
-				buf.Term();
-
-				SQPrint( vm, _SC("(sqdbg) Data breakpoint hit: " FMT_CSTR "\n"), buf.ptr );
-
-				Break( vm, { breakreason_t::DataBreakpoint, buf, dw.id } );
-				ret = true;
 			}
 
 			FreeDataWatch( dw );
@@ -5355,6 +5562,7 @@ void SQDebugServer::FreeDataWatch( datawatch_t &dw )
 	}
 
 	FreeString( &m_Strings, &dw.name );
+	FreeString( &m_Strings, &dw.logMessage );
 }
 
 void SQDebugServer::RemoveDataBreakpoints()
@@ -5531,7 +5739,7 @@ static void Escape( char *dst, unsigned int *len, unsigned int size )
 						dst[1] = 'x';
 #endif
 
-						int l = printhex< true, false >( dst + 2, memEnd - ( dst + 2 ), val );
+						int l = printhex< false >( dst + 2, memEnd - ( dst + 2 ), val );
 						dst += 1 + l;
 						strEnd += 1 + l;
 						*len += 1 + l;
@@ -5565,11 +5773,13 @@ static void UndoEscape( char *dst, unsigned int *len )
 		}
 
 #define _shift( bytesWritten, bytesRead ) \
+do { \
 	Assert( (bytesWritten) < (bytesRead) ); \
 	memmove( dst + (bytesWritten), dst + (bytesRead), end - ( dst + (bytesRead) ) ); \
 	dst += (bytesWritten); \
 	end -= (bytesRead) - (bytesWritten); \
-	*len -= (bytesRead) - (bytesWritten);
+	*len -= (bytesRead) - (bytesWritten); \
+} while (0)
 
 		switch ( dst[1] )
 		{
@@ -5619,7 +5829,7 @@ static int StringifyBytes( T *str, int strLen, char *dst, int size )
 		len++;
 		len++;
 
-		int l = printhex< true, false >( dst, size - len, *str );
+		int l = printhex< false >( dst, size - len, *str );
 		dst += l;
 		len += l;
 	}
@@ -5659,50 +5869,22 @@ static inline int printhex( int flags, C *buf, int size, I value )
 	{
 		if ( !( flags & kFS_NoPrefix ) )
 		{
-			if ( !( flags & kFS_Padding ) )
-			{
-				len = printhex< false, true, false >( buf, size, value );
-			}
-			else
-			{
-				len = printhex< true, true, false >( buf, size, value );
-			}
+			len = printhex< true, false >( buf, size, value, flags >> 24 );
 		}
 		else
 		{
-			if ( !( flags & kFS_Padding ) )
-			{
-				len = printhex< false, false, false >( buf, size, value );
-			}
-			else
-			{
-				len = printhex< true, false, false >( buf, size, value );
-			}
+			len = printhex< false, false >( buf, size, value, flags >> 24 );
 		}
 	}
 	else
 	{
 		if ( !( flags & kFS_NoPrefix ) )
 		{
-			if ( !( flags & kFS_Padding ) )
-			{
-				len = printhex< false, true, true >( buf, size, value );
-			}
-			else
-			{
-				len = printhex< true, true, true >( buf, size, value );
-			}
+			len = printhex< true, true >( buf, size, value, flags >> 24 );
 		}
 		else
 		{
-			if ( !( flags & kFS_Padding ) )
-			{
-				len = printhex< false, false, true >( buf, size, value );
-			}
-			else
-			{
-				len = printhex< true, false, true >( buf, size, value );
-			}
+			len = printhex< false, true >( buf, size, value, flags >> 24 );
 		}
 	}
 
@@ -5716,25 +5898,11 @@ static inline int printbin( int flags, C *buf, int size, I value )
 
 	if ( !( flags & kFS_NoPrefix ) )
 	{
-		if ( !( flags & kFS_Padding ) )
-		{
-			len = printbin< false, true >( buf, size, value );
-		}
-		else
-		{
-			len = printbin< true, true >( buf, size, value );
-		}
+		len = printbin< true >( buf, size, value, flags >> 24 );
 	}
 	else
 	{
-		if ( !( flags & kFS_Padding ) )
-		{
-			len = printbin< false, false >( buf, size, value );
-		}
-		else
-		{
-			len = printbin< true, false >( buf, size, value );
-		}
+		len = printbin< false >( buf, size, value, flags >> 24 );
 	}
 
 	return len;
@@ -5905,7 +6073,7 @@ getfloat:
 				{
 					if ( flags & kFS_Hexadecimal )
 					{
-						len = printhex< false >( buf, size, (SQUnsignedInteger)_integer(obj) );
+						len = printhex( buf, size, (SQUnsignedInteger)_integer(obj), 0 );
 					}
 					else if ( flags & kFS_Octal )
 					{
@@ -5913,7 +6081,7 @@ getfloat:
 					}
 					else if ( flags & kFS_Binary )
 					{
-						len = printbin< false >( buf, size, (SQUnsignedInteger)_integer(obj) );
+						len = printbin( buf, size, (SQUnsignedInteger)_integer(obj), 0 );
 					}
 					else
 					{
@@ -5927,7 +6095,7 @@ getfloat:
 
 				if ( flags & kFS_Hexadecimal )
 				{
-					len = printhex< false >( buf, size, ch );
+					len = printhex( buf, size, ch, 0 );
 				}
 				else if ( flags & kFS_Octal )
 				{
@@ -5935,7 +6103,7 @@ getfloat:
 				}
 				else if ( flags & kFS_Binary )
 				{
-					len = printbin< false >( buf, size, (SQUnsignedInteger)ch );
+					len = printbin( buf, size, (SQUnsignedInteger)ch, 0 );
 				}
 				else
 				{
@@ -5961,28 +6129,26 @@ getfloat:
 				{
 					buf[len++] = '\\';
 					buf[len++] = 'x';
-					len += printhex< true, false, false >( buf + len, size, (unsigned char)ch );
+					len += printhex< false, false >( buf + len, size, (unsigned char)ch );
 				}
 #endif
 				else
 				{
 					buf[len++] = '\\';
 #ifdef SQUNICODE
-#if WCHAR_SIZE == 4
-					if ( ch > 0xFFFF )
+					if ( sizeof(SQChar) == 4 && ch > 0xFFFF )
 					{
 						buf[len++] = 'U';
-						len += printhex< true, false, false >( buf + len, size, ch );
+						len += printhex< false, false >( buf + len, size, ch );
 					}
 					else
-#endif
 					{
 						buf[len++] = 'u';
-						len += printhex< true, false, false >( buf + len, size, (uint16_t)ch );
+						len += printhex< false, false >( buf + len, size, (uint16_t)ch );
 					}
 #else
 					buf[len++] = 'x';
-					len += printhex< true, false, false >( buf + len, size, (unsigned char)ch );
+					len += printhex< false, false >( buf + len, size, (unsigned char)ch );
 #endif
 				}
 
@@ -5992,7 +6158,7 @@ getfloat:
 			}
 			else if ( flags & kFS_Binary )
 			{
-				const int size = 2 + sizeof(SQInteger) * 8;
+				const int size = 2 + sizeof(int64_t) * 8;
 				char *buf = ScratchPad( size );
 				int len = printbin( flags, buf, size, (SQUnsignedInteger)_integer(obj) );
 				return { buf, (unsigned int)len };
@@ -6011,7 +6177,7 @@ getfloat:
 			// Check hex last to make watch format specifiers overwrite "format.hex" client option
 			else if ( ( flags & kFS_Hexadecimal ) && !( flags & kFS_Decimal ) )
 			{
-				const int size = FMT_PTR_LEN;
+				const int size = 2 + sizeof(int64_t) * 2;
 				char *buf = ScratchPad( size );
 				int len = printhex( flags, buf, size, (SQUnsignedInteger)_integer(obj) );
 				return { buf, (unsigned int)len };
@@ -8538,175 +8704,45 @@ bool SQDebugServer::Increment( const objref_t &obj, int amt )
 //
 // Variable evaluation is done in given stack frame as they are parsed, state is not kept
 //
-class SQDebugServer::CCompiler
-{
-public:
-	enum
-	{
-		Err_InvalidToken = -50,
-		Err_UnfinishedComment,
-		Err_UnfinishedString,
-		Err_UnfinishedChar,
-		Err_InvalidEscape,
-		Err_InvalidOctalEscape,
-		Err_InvalidXEscape,
-		Err_InvalidU16Escape,
-		Err_InvalidU32Escape,
-		Err_InvalidDecimal,
-		Err_InvalidOctal,
-		Err_InvalidHexadecimal,
-		Err_InvalidBinary,
-		Err_InvalidFloat,
 
-		Token_End = 1,
-		Token_Ref,
-		Token_Identifier,
-		Token_String,
-		Token_Integer,
-		Token_Float,
-		Token_Null,
-		Token_False,
-		Token_True,
-		Token_This,
-		Token_DoubleColon,
-		Token_Delete,
-#if SQUIRREL_VERSION_NUMBER < 300
-		Token_Parent,
-		Token_Vargv,
-		Token_Vargc,
-#endif
-		Token_File,
-		Token_Line,
-
-		Token_NewSlot,
-		Token_PendingKey,
-		Token_Operator,
-		Token_Value,
-
-		_op = 0xff00,
-
-		// upper 4 bits : precedence
-		// lower 4 bits : unique id
-		Token_Not			= 0x00 | _op,
-		Token_BwNot			= 0x01 | _op,
-		Token_Typeof		= 0x02 | _op,
-		Token_Clone			= 0x03 | _op,
-
-		Token_Increment		= 0x10 | _op,
-		Token_Decrement		= 0x11 | _op,
-
-#ifdef SQDBG_COMPILER_POW_OP
-		Token_Pow			= 0x20 | _op,
-#endif
-		Token_Mul			= 0x21 | _op,
-		Token_Div			= 0x22 | _op,
-		Token_Mod			= 0x23 | _op,
-
-		Token_Add			= 0x30 | _op,
-		Token_Sub			= 0x31 | _op,
-
-		Token_LShift		= 0x40 | _op,
-		Token_RShift		= 0x41 | _op,
-		Token_URShift		= 0x42 | _op,
-
-		Token_Cmp3W			= 0x50 | _op,
-
-		Token_Less			= 0x60 | _op,
-		Token_LessEq		= 0x61 | _op,
-		Token_Greater		= 0x62 | _op,
-		Token_GreaterEq		= 0x63 | _op,
-
-		Token_Eq			= 0x70 | _op,
-		Token_NotEq			= 0x71 | _op,
-
-		Token_BwAnd			= 0x80 | _op,
-		Token_BwXor			= 0x90 | _op,
-		Token_BwOr			= 0xA0 | _op,
-
-		Token_In			= 0xB0 | _op,
-		Token_NotIn			= 0xB1 | _op,
-		Token_InstanceOf	= 0xB2 | _op,
-
-		Token_LogicalAnd	= 0xC0 | _op,
-		Token_LogicalOr		= 0xD0 | _op,
-
-		_assign = 0xff0000,
-
-		Token_Assign,
-		Token_AssignAdd		= _assign | Token_Add,
-		Token_AssignSub		= _assign | Token_Sub,
-		Token_AssignMul		= _assign | Token_Mul,
-		Token_AssignDiv		= _assign | Token_Div,
-		Token_AssignMod		= _assign | Token_Mod,
-		Token_AssignAnd		= _assign | Token_BwAnd,
-		Token_AssignXor		= _assign | Token_BwXor,
-		Token_AssignOr		= _assign | Token_BwOr,
-		Token_AssignLS		= _assign | Token_LShift,
-		Token_AssignRS		= _assign | Token_RShift,
-		Token_AssignURS		= _assign | Token_URShift,
-	};
-
-	struct token_t
-	{
-		token_t() : type(0) {}
-
-		int type;
-		union
-		{
-			string_t _string;
-			SQInteger _integer;
-			SQFloat _float;
-		};
-	};
-
-#ifndef SQDBG_COMPILER_MAX_PARAMETER_COUNT
-#define SQDBG_COMPILER_MAX_PARAMETER_COUNT 8
-#endif
-#ifndef SQDBG_COMPILER_MAX_UNARY_STACK
-#define SQDBG_COMPILER_MAX_UNARY_STACK 4
-#endif
-
-private:
-	struct callparams_t
-	{
-		SQObjectPtr params[ SQDBG_COMPILER_MAX_PARAMETER_COUNT ];
-		SQObjectPtr func;
-		int paramCount;
-	};
-
-	string_t &m_expr;
-	char *m_cur;
-	char *m_end;
-	int m_prevToken;
-
-public:
-	// To get partial matches for completions request
-	token_t m_lastToken;
-
-	// To add expression watchpoints
-	// Only returns the last checked ref regardless of any other operations that come after
-	// This is fine because adding illogical watchpoints doesn't have significant side effects -
-	// prevention is at the user's discretion,
-	// and the ability to add on expressions is useful
-	objref_t m_lastRef;
-
-public:
-	// Expression has to be NUL terminated
-	CCompiler( string_t &expression ) :
+	SQDebugServer::CCompiler::CCompiler( SQDebugServer *dbg, string_t &expression ) :
+		m_dbg(dbg),
 		m_expr(expression),
 		m_cur(expression.ptr),
 		m_end(expression.ptr + expression.len),
 		m_prevToken(0),
 		m_lastToken(),
-		m_lastRef()
+		m_lastRef(),
+		m_lastError(0, 0)
 	{
 	}
 
-	CCompiler( const CCompiler & );
-	CCompiler &operator=( const CCompiler & );
+	SQDebugServer::ECompileReturnCode SQDebugServer::CCompiler::Evaluate(
+			HSQUIRRELVM vm,
+			int frame,
+			SQObjectPtr &val )
+	{
+		ECompileReturnCode res;
 
-	ECompileReturnCode Evaluate( SQDebugServer *dbg, HSQUIRRELVM vm, int frame, SQObjectPtr &val,
-			int closer = Token_End )
+		for (;;)
+		{
+			res = Evaluate( vm, frame, val, Token_End );
+
+			if ( res != CompileReturnCode_Success )
+				return res;
+
+			if ( m_prevToken != ';' || Next() == Token_End )
+				break;
+		}
+
+		return res;
+	}
+
+	SQDebugServer::ECompileReturnCode SQDebugServer::CCompiler::Evaluate(
+			HSQUIRRELVM vm,
+			int frame,
+			SQObjectPtr &val,
+			int closer )
 	{
 		Assert( frame == INVALID_FRAME || IsValidStackFrame( vm, frame ) );
 
@@ -8738,15 +8774,21 @@ public:
 				case Token_Identifier:
 				{
 					if ( !ExpectsIdentifier( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					m_lastToken = token;
 
-					if ( !dbg->GetObj_Frame( vm, frame, token._string, obj, val ) )
+					if ( !m_dbg->GetObj_Frame( vm, frame, token._string, obj, val ) )
 					{
 						// allow non-existent key
 						if ( Next() != Token_NewSlot )
+						{
+							SetError( Err_IndexNotFound, &token._string );
 							return CompileReturnCode_DoesNotExist;
+						}
 
 						// implicit this.
 						val = frame != INVALID_FRAME ?
@@ -8768,11 +8810,12 @@ public:
 									break;
 								}
 
+								SetError( Err_IndexNotFound, &token._string );
 								return CompileReturnCode_DoesNotExist;
 						}
 
 						obj.src = val;
-						obj.key = CreateSQString( dbg, token._string );
+						obj.key = CreateSQString( m_dbg, token._string );
 						prevtoken = Token_PendingKey;
 					}
 					else
@@ -8787,9 +8830,12 @@ public:
 				case Token_String:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
-					val = CreateSQString( dbg, token._string );
+					val = CreateSQString( m_dbg, token._string );
 
 					prevtoken = Token_Value;
 					break;
@@ -8797,7 +8843,10 @@ public:
 				case Token_Integer:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					val = (SQInteger)token._integer;
 
@@ -8807,7 +8856,10 @@ public:
 				case Token_Float:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					val = (SQFloat)token._float;
 
@@ -8817,7 +8869,10 @@ public:
 				case Token_Null:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					val.Null();
 
@@ -8828,7 +8883,10 @@ public:
 				case Token_True:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					val.Null();
 					val._type = OT_BOOL;
@@ -8840,7 +8898,10 @@ public:
 				case Token_This:
 				{
 					if ( !ExpectsIdentifier( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					val = frame != INVALID_FRAME ?
 						vm->_stack._vals[ GetStackBase( vm, frame ) ] :
@@ -8860,19 +8921,25 @@ unary:
 					{
 						if ( deleteop )
 						{
-							if ( !dbg->Delete( obj, val ) )
+							if ( !m_dbg->Delete( obj, val ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							deleteop = 0;
 							prevtoken = Token_Value;
 						}
 						else if ( incrop )
 						{
-							if ( !dbg->Increment( obj, ( incrop & 0x1 ) ? 1 : -1 ) )
+							if ( !m_dbg->Increment( obj, ( incrop & 0x1 ) ? 1 : -1 ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							if ( incrop & 0x8 ) // prefix
-								dbg->Get( obj, val );
+								m_dbg->Get( obj, val );
 
 							incrop = 0;
 							prevtoken = Token_Value;
@@ -8880,6 +8947,7 @@ unary:
 					}
 					else if ( deleteop || incrop )
 					{
+						SetError( Err_OpFailed );
 						return CompileReturnCode_OpFailure;
 					}
 
@@ -8887,8 +8955,11 @@ unary:
 					{
 						while ( unaryidx != -1 )
 						{
-							if ( !UnaryOp( dbg, unarybuf[unaryidx] | _op, val ) )
+							if ( !UnaryOp( m_dbg, unarybuf[unaryidx] | _op, val ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							unaryidx--;
 						}
@@ -8904,11 +8975,15 @@ unary:
 							goto binary;
 						}
 
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
 					}
 
 					if ( unaryidx + 1 >= (int)sizeof(unarybuf) )
+					{
+						SetError( Err_BufLim );
 						return CompileReturnCode_OpBufferFull;
+					}
 
 					unaryidx++;
 					unarybuf[unaryidx] = (unsigned char)( token.type & ~_op );
@@ -8957,25 +9032,34 @@ unary:
 binary:
 					// identifier boundary
 					if ( !IsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					if ( prevtoken == Token_Ref )
 					{
 						if ( deleteop )
 						{
-							if ( !dbg->Delete( obj, val ) )
+							if ( !m_dbg->Delete( obj, val ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							deleteop = 0;
 							prevtoken = Token_Value;
 						}
 						else if ( incrop )
 						{
-							if ( !dbg->Increment( obj, ( incrop & 0x1 ) ? 1 : -1 ) )
+							if ( !m_dbg->Increment( obj, ( incrop & 0x1 ) ? 1 : -1 ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							if ( incrop & 0x8 ) // prefix
-								dbg->Get( obj, val );
+								m_dbg->Get( obj, val );
 
 							incrop = 0;
 							prevtoken = Token_Value;
@@ -8983,13 +9067,17 @@ binary:
 					}
 					else if ( deleteop || incrop )
 					{
+						SetError( Err_OpFailed );
 						return CompileReturnCode_OpFailure;
 					}
 
 					while ( unaryidx != -1 )
 					{
-						if ( !UnaryOp( dbg, unarybuf[unaryidx] | _op, val ) )
+						if ( !UnaryOp( m_dbg, unarybuf[unaryidx] | _op, val ) )
+						{
+							SetError( Err_OpFailed );
 							return CompileReturnCode_OpFailure;
+						}
 
 						unaryidx--;
 					}
@@ -9003,8 +9091,11 @@ binary:
 						{
 							SQObjectPtr &lhs = valbuf[opbufidx];
 
-							if ( !BinaryOp( dbg, prev, lhs, val, val ) )
+							if ( !BinaryOp( m_dbg, prev, lhs, val, val ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							lhs.Null();
 							opbufidx--;
@@ -9035,7 +9126,10 @@ binary:
 					Assert( opbufidx + 1 < 2 );
 
 					if ( opbufidx + 1 >= 2 )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					opbufidx++;
 					opbuf[opbufidx] = (unsigned char)( token.type & ~_op );
@@ -9060,6 +9154,7 @@ binary:
 					}
 					else
 					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
 					}
 
@@ -9069,25 +9164,34 @@ binary:
 				{
 					// identifier boundary
 					if ( !IsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					if ( prevtoken == Token_Ref )
 					{
 						if ( deleteop )
 						{
-							if ( !dbg->Delete( obj, val ) )
+							if ( !m_dbg->Delete( obj, val ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							deleteop = 0;
 							prevtoken = Token_Value;
 						}
 						else if ( incrop )
 						{
-							if ( !dbg->Increment( obj, ( incrop & 0x1 ) ? 1 : -1 ) )
+							if ( !m_dbg->Increment( obj, ( incrop & 0x1 ) ? 1 : -1 ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							if ( incrop & 0x8 ) // prefix
-								dbg->Get( obj, val );
+								m_dbg->Get( obj, val );
 
 							incrop = 0;
 							prevtoken = Token_Value;
@@ -9095,34 +9199,44 @@ binary:
 					}
 					else if ( deleteop || incrop )
 					{
+						SetError( Err_OpFailed );
 						return CompileReturnCode_OpFailure;
 					}
 
 					while ( unaryidx != -1 )
 					{
-						if ( !UnaryOp( dbg, unarybuf[unaryidx] | _op, val ) )
+						if ( !UnaryOp( m_dbg, unarybuf[unaryidx] | _op, val ) )
+						{
+							SetError( Err_OpFailed );
 							return CompileReturnCode_OpFailure;
+						}
 
 						unaryidx--;
 					}
 
 					while ( opbufidx != -1 )
 					{
-						if ( !BinaryOp( dbg, opbuf[opbufidx] | _op, valbuf[opbufidx], val, val ) )
+						if ( !BinaryOp( m_dbg, opbuf[opbufidx] | _op, valbuf[opbufidx], val, val ) )
+						{
+							SetError( Err_OpFailed );
 							return CompileReturnCode_OpFailure;
+						}
 
 						opbufidx--;
 					}
 
 					if ( !IsFalse( val ) )
 					{
-						ECompileReturnCode res = Evaluate( dbg, vm, frame, val, ':' );
+						ECompileReturnCode res = Evaluate( vm, frame, val, ':' );
 
 						if ( res != CompileReturnCode_Success )
 							return res;
 
 						if ( m_prevToken != ':' )
-							return CompileReturnCode_Unsupported;
+						{
+							SetError( Err_Expected, (void*)':' );
+							return CompileReturnCode_SyntaxError;
+						}
 
 						res = LexAll( closer );
 
@@ -9139,7 +9253,7 @@ binary:
 						if ( res != CompileReturnCode_Success )
 							return res;
 
-						res = Evaluate( dbg, vm, frame, val, closer );
+						res = Evaluate( vm, frame, val, closer );
 
 						if ( res != CompileReturnCode_Success )
 							return res;
@@ -9154,7 +9268,10 @@ binary:
 				case Token_DoubleColon:
 				{
 					if ( !ExpectsIdentifier( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					token = Lex();
 
@@ -9173,21 +9290,25 @@ binary:
 					{
 						m_lastToken.type = 0;
 						val = root;
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
 					}
 
 					m_lastToken = token;
 
-					if ( !dbg->GetObj_Var( root, token._string, true, obj, val ) )
+					if ( !m_dbg->GetObj_Var( root, token._string, true, obj, val ) )
 					{
 						// allow non-existent key
 						if ( Next() != Token_NewSlot )
+						{
+							SetError( Err_IndexNotFound, &token._string );
 							return CompileReturnCode_DoesNotExist;
+						}
 
 						Assert( sq_type(root) == OT_TABLE );
 						obj.type = objref_t::TABLE;
 						obj.src = root;
-						obj.key = CreateSQString( dbg, token._string );
+						obj.key = CreateSQString( m_dbg, token._string );
 						prevtoken = Token_PendingKey;
 					}
 					else
@@ -9202,7 +9323,10 @@ binary:
 				case '.':
 				{
 					if ( !IsValue( prevtoken ) || prevtoken == Token_Integer || prevtoken == Token_Float )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					token_t next = Lex();
 
@@ -9282,11 +9406,13 @@ binary:
 						}
 
 						m_lastToken.type = '.';
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
 					}
 					else if ( next.type != Token_Identifier )
 					{
 						m_lastToken.type = '.';
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
 					}
 
@@ -9300,14 +9426,18 @@ binary:
 
 					SQObjectPtr tmp;
 
-					if ( !dbg->GetObj_Var( val, next._string, true, obj, tmp ) )
+					if ( !m_dbg->GetObj_Var( val, next._string, true, obj, tmp ) )
 					{
 						SQTable *del = GetDefaultDelegate( vm, sq_type(val) );
-						if ( !del || !SQTable_Get( dbg, del, next._string, tmp ) )
+
+						if ( !del || !SQTable_Get( m_dbg, del, next._string, tmp ) )
 						{
 							// allow non-existent key
 							if ( nexttoken != Token_NewSlot )
+							{
+								SetError( Err_IndexNotFound, &next._string );
 								return CompileReturnCode_DoesNotExist;
+							}
 
 							switch ( sq_type(val) )
 							{
@@ -9324,11 +9454,12 @@ binary:
 										break;
 									}
 
+									SetError( Err_IndexNotFound, &next._string );
 									return CompileReturnCode_DoesNotExist;
 							}
 
 							obj.src = val;
-							obj.key = CreateSQString( dbg, next._string );
+							obj.key = CreateSQString( m_dbg, next._string );
 							prevtoken = Token_PendingKey;
 						}
 						else
@@ -9351,7 +9482,10 @@ binary:
 				case '{':
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					// new table
 					SQObjectPtr key;
@@ -9363,7 +9497,7 @@ binary:
 
 						if ( next.type == '[' )
 						{
-							ECompileReturnCode res = Evaluate( dbg, vm, frame, key, ']' );
+							ECompileReturnCode res = Evaluate( vm, frame, key, ']' );
 
 							if ( res != CompileReturnCode_Success )
 							{
@@ -9376,12 +9510,13 @@ binary:
 							{
 								val = key;
 								tbl->Release();
-								return CompileReturnCode_Unsupported;
+								SetError( Err_Expected, (void*)']' );
+								return CompileReturnCode_SyntaxError;
 							}
 						}
 						else if ( next.type == Token_Identifier )
 						{
-							key = CreateSQString( dbg, next._string );
+							key = CreateSQString( m_dbg, next._string );
 						}
 						else if ( next.type == '}' )
 						{
@@ -9390,7 +9525,8 @@ binary:
 						else
 						{
 							tbl->Release();
-							return CompileReturnCode_Unsupported;
+							SetError( Err_Expected, (void*)'}' );
+							return CompileReturnCode_SyntaxError;
 						}
 
 						next = Lex();
@@ -9398,10 +9534,11 @@ binary:
 						if ( next.type != Token_Assign )
 						{
 							tbl->Release();
-							return CompileReturnCode_Unsupported;
+							SetError( Err_Expected, (void*)'=' );
+							return CompileReturnCode_SyntaxError;
 						}
 
-						ECompileReturnCode res = Evaluate( dbg, vm, frame, val, '}' );
+						ECompileReturnCode res = Evaluate( vm, frame, val, '}' );
 
 						if ( res != CompileReturnCode_Success )
 						{
@@ -9419,7 +9556,8 @@ binary:
 							break;
 
 						tbl->Release();
-						return CompileReturnCode_Unsupported;
+						SetError( Err_Expected, (void*)'}' );
+						return CompileReturnCode_SyntaxError;
 					}
 
 					val = tbl;
@@ -9435,7 +9573,7 @@ binary:
 
 						for (;;)
 						{
-							ECompileReturnCode res = Evaluate( dbg, vm, frame, val, ']' );
+							ECompileReturnCode res = Evaluate( vm, frame, val, ']' );
 
 							if ( res == CompileReturnCode_Success )
 							{
@@ -9455,7 +9593,8 @@ binary:
 								break;
 
 							arr->Release();
-							return CompileReturnCode_Unsupported;
+							SetError( Err_Expected, (void*)']' );
+							return CompileReturnCode_SyntaxError;
 						}
 
 						val = arr;
@@ -9464,26 +9603,36 @@ binary:
 					}
 
 					if ( !IsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					SQObjectPtr tmp, self = val;
 
-					ECompileReturnCode res = Evaluate( dbg, vm, frame, val, ']' );
+					ECompileReturnCode res = Evaluate( vm, frame, val, ']' );
 
 					if ( res != CompileReturnCode_Success )
 						return res;
 
 					if ( m_prevToken != ']' )
-						return CompileReturnCode_Unsupported;
+					{
+						SetError( Err_Expected, (void*)']' );
+						return CompileReturnCode_SyntaxError;
+					}
 
-					if ( !dbg->GetObj_Var( self, val, obj, tmp ) )
+					if ( !m_dbg->GetObj_Var( self, val, obj, tmp ) )
 					{
 						SQTable *del = GetDefaultDelegate( vm, sq_type(self) );
+
 						if ( !del || !del->Get( val, val ) )
 						{
 							// allow non-existent key
 							if ( Next() != Token_NewSlot )
+							{
+								SetError( Err_OIndexNotFound, &val );
 								return CompileReturnCode_DoesNotExist;
+							}
 
 							switch ( sq_type(self) )
 							{
@@ -9500,6 +9649,7 @@ binary:
 										break;
 									}
 
+									SetError( Err_OIndexNotFound, &val );
 									return CompileReturnCode_DoesNotExist;
 							}
 
@@ -9527,13 +9677,16 @@ binary:
 				{
 					if ( ExpectsValue( prevtoken ) )
 					{
-						ECompileReturnCode res = Evaluate( dbg, vm, frame, val, ')' );
+						ECompileReturnCode res = Evaluate( vm, frame, val, ')' );
 
 						if ( res != CompileReturnCode_Success )
 							return res;
 
 						if ( m_prevToken != ')' )
-							return CompileReturnCode_Unsupported;
+						{
+							SetError( Err_Expected, (void*)')' );
+							return CompileReturnCode_SyntaxError;
+						}
 
 						prevtoken = Token_Value;
 						break;
@@ -9557,7 +9710,11 @@ binary:
 							{
 								if ( !_delegable(val)->_delegate ||
 										!_delegable(val)->GetMetaMethod( vm, MT_CALL, cp.func ) )
+								{
+									string_t s( "_call" );
+									SetError( Err_IndexNotFound, &s );
 									return CompileReturnCode_DoesNotExist;
+								}
 
 								// in MT_CALL the object itself is the env,
 								// and the env is passed as an extra parameter
@@ -9565,6 +9722,7 @@ binary:
 								break;
 							}
 
+							SetError( Err_Unsupported );
 							return CompileReturnCode_Unsupported;
 					}
 
@@ -9586,12 +9744,15 @@ binary:
 					// call parameters
 					for (;;)
 					{
-						ECompileReturnCode res = Evaluate( dbg, vm, frame, val, ')' );
+						ECompileReturnCode res = Evaluate( vm, frame, val, ')' );
 
 						if ( res == CompileReturnCode_Success )
 						{
 							if ( cp.paramCount >= (int)_ArraySize(cp.params) )
+							{
+								SetError( Err_BufLim );
 								return CompileReturnCode_CallBufferFull;
+							}
 
 							cp.params[ cp.paramCount++ ] = val;
 							val.Null();
@@ -9612,10 +9773,11 @@ binary:
 							break;
 
 						m_lastToken.type = 0;
-						return CompileReturnCode_Unsupported;
+						SetError( Err_Expected, (void*)')' );
+						return CompileReturnCode_SyntaxError;
 					}
 
-					if ( !dbg->RunClosure( cp.func, cp.params, cp.paramCount, val ) )
+					if ( !m_dbg->RunClosure( cp.func, cp.params, cp.paramCount, val ) )
 						return CompileReturnCode_CallError;
 
 					prevtoken = Token_Value;
@@ -9624,7 +9786,10 @@ binary:
 				case Token_Delete:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					deleteop = 1;
 					prevtoken = Token_Delete;
@@ -9636,7 +9801,10 @@ binary:
 					if ( !IsValue( prevtoken ) )
 					{
 						if ( !ExpectsValue( prevtoken ) )
+						{
+							SetError( Err_Unsupported );
 							return CompileReturnCode_Unsupported;
+						}
 
 						// implicit this.
 						val = frame != INVALID_FRAME ?
@@ -9673,7 +9841,11 @@ binary:
 							break;
 						}
 						default:
+						{
+							string_t s( "parent" );
+							SetError( Err_IndexNotFound, &s );
 							return CompileReturnCode_DoesNotExist;
+						}
 					}
 
 					prevtoken = Token_Value;
@@ -9682,31 +9854,51 @@ binary:
 				case Token_Vargv:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					if ( frame == INVALID_FRAME )
+					{
+						string_t s( "vargv" );
+						SetError( Err_IndexNotFound, &s );
 						return CompileReturnCode_DoesNotExist;
+					}
 
 					token_t next = Lex();
 
 					if ( next.type != '[' )
+					{
+						string_t s( "vargv" );
+						SetError( Err_IndexNotFound, &s );
 						return CompileReturnCode_DoesNotExist;
+					}
 
-					ECompileReturnCode res = Evaluate( dbg, vm, frame, val, ']' );
+					ECompileReturnCode res = Evaluate( vm, frame, val, ']' );
 
 					if ( res != CompileReturnCode_Success )
 						return res;
 
 					if ( m_prevToken != ']' )
+					{
+						SetError( Err_Expected, (void*)']' );
 						return CompileReturnCode_Unsupported;
+					}
 
 					if ( sq_type(val) != OT_INTEGER )
+					{
+						SetError( Err_OIndexNotFound, &val );
 						return CompileReturnCode_DoesNotExist;
+					}
 
 					const SQVM::CallInfo *ci = vm->_callsstack + frame;
 
 					if ( _integer(val) < 0 || _integer(val) >= ci->_vargs.size )
+					{
+						SetError( Err_OIndexNotFound, &val );
 						return CompileReturnCode_DoesNotExist;
+					}
 
 					val = vm->_vargsstack[ ci->_vargs.base + _integer(val) ];
 
@@ -9716,10 +9908,17 @@ binary:
 				case Token_Vargc:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					if ( frame == INVALID_FRAME )
+					{
+						string_t s( "vargc" );
+						SetError( Err_IndexNotFound, &s );
 						return CompileReturnCode_DoesNotExist;
+					}
 
 					const SQVM::CallInfo *ci = vm->_callsstack + frame;
 
@@ -9732,7 +9931,10 @@ binary:
 				case Token_File:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					const SQVM::CallInfo *ci = vm->_callsstack + frame;
 
@@ -9751,7 +9953,10 @@ binary:
 				case Token_Line:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					const SQVM::CallInfo *ci = vm->_callsstack + frame;
 
@@ -9786,14 +9991,20 @@ binary:
 				{
 					if ( prevtoken != Token_Ref &&
 							!( token.type == Token_NewSlot && prevtoken == Token_PendingKey ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					if ( unaryidx != -1 || opbufidx != -1 )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					SQObjectPtr target = val;
 
-					ECompileReturnCode res = Evaluate( dbg, vm, frame, val, closer );
+					ECompileReturnCode res = Evaluate( vm, frame, val, closer );
 
 					if ( res != CompileReturnCode_Success )
 						return res;
@@ -9812,20 +10023,29 @@ binary:
 						case Token_AssignRS:
 						case Token_AssignURS:
 						{
-							if ( !BinaryOp( dbg, token.type & ~_assign, target, val, val ) )
+							if ( !BinaryOp( m_dbg, token.type & ~_assign, target, val, val ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 						}
 						case Token_Assign:
 						{
-							if ( !dbg->Set( obj, val ) )
+							if ( !m_dbg->Set( obj, val ) )
+							{
+								SetError( Err_SetFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							return CompileReturnCode_Success;
 						}
 						case Token_NewSlot:
 						{
-							if ( !dbg->NewSlot( obj, val ) )
+							if ( !m_dbg->NewSlot( obj, val ) )
+							{
+								SetError( Err_SetFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							return CompileReturnCode_Success;
 						}
@@ -9840,28 +10060,41 @@ binary:
 						m_prevToken = token.type;
 
 						if ( ExpectsValue( prevtoken ) )
+						{
+							if ( closer < 0x20 )
+								SetError( Err_Unsupported );
 							return CompileReturnCode_NoValue;
+						}
 
 						if ( prevtoken == Token_PendingKey )
+						{
+							SetError( Err_Unsupported );
 							return CompileReturnCode_Unsupported;
+						}
 
 						if ( prevtoken == Token_Ref )
 						{
 							if ( deleteop )
 							{
-								if ( !dbg->Delete( obj, val ) )
+								if ( !m_dbg->Delete( obj, val ) )
+								{
+									SetError( Err_OpFailed );
 									return CompileReturnCode_OpFailure;
+								}
 
 								deleteop = 0;
 								prevtoken = Token_Value;
 							}
 							else if ( incrop )
 							{
-								if ( !dbg->Increment( obj, ( incrop & 0x1 ) ? 1 : -1 ) )
+								if ( !m_dbg->Increment( obj, ( incrop & 0x1 ) ? 1 : -1 ) )
+								{
+									SetError( Err_OpFailed );
 									return CompileReturnCode_OpFailure;
+								}
 
 								if ( incrop & 0x8 ) // prefix
-									dbg->Get( obj, val );
+									m_dbg->Get( obj, val );
 
 								incrop = 0;
 								prevtoken = Token_Value;
@@ -9869,21 +10102,28 @@ binary:
 						}
 						else if ( deleteop || incrop )
 						{
+							SetError( Err_OpFailed );
 							return CompileReturnCode_OpFailure;
 						}
 
 						while ( unaryidx != -1 )
 						{
-							if ( !UnaryOp( dbg, unarybuf[unaryidx] | _op, val ) )
+							if ( !UnaryOp( m_dbg, unarybuf[unaryidx] | _op, val ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							unaryidx--;
 						}
 
 						while ( opbufidx != -1 )
 						{
-							if ( !BinaryOp( dbg, opbuf[opbufidx] | _op, valbuf[opbufidx], val, val ) )
+							if ( !BinaryOp( m_dbg, opbuf[opbufidx] | _op, valbuf[opbufidx], val, val ) )
+							{
+								SetError( Err_OpFailed );
 								return CompileReturnCode_OpFailure;
+							}
 
 							opbufidx--;
 						}
@@ -9923,14 +10163,7 @@ binary:
 							case ';':
 							{
 								if ( closer == Token_End )
-								{
-									// Semicolon at end of expression
-									if ( Next() == Token_End )
-										return CompileReturnCode_Success;
-
-									return Evaluate( dbg, vm, frame, val, closer );
-								}
-
+									return CompileReturnCode_Success;
 								break;
 							}
 							case Token_End:
@@ -9941,15 +10174,26 @@ binary:
 							}
 						}
 
+						if ( closer < 0x20 )
+						{
+							SetError( Err_Unsupported );
+						}
+						else
+						{
+							SetError( Err_Expected, (void*)(uintptr_t)closer );
+						}
+
 						return CompileReturnCode_Unsupported;
 					}
 					else if ( token.type == Err_InvalidToken )
 					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
 					}
 					else
 					{
 						m_prevToken = token.type;
+						SetError( token.type );
 						return CompileReturnCode_SyntaxError;
 					}
 				}
@@ -9957,43 +10201,125 @@ binary:
 		}
 	}
 
-	sqstring_t LastError()
+	string_t SQDebugServer::CCompiler::LastError()
 	{
-		switch ( m_prevToken )
-		{
-			case Err_InvalidFloat:
-				return _SC("invalid float literal");
-			case Err_InvalidBinary:
-				return _SC("invalid binary literal");
-			case Err_InvalidHexadecimal:
-				return _SC("invalid hexadecimal literal");
-			case Err_InvalidOctal:
-				return _SC("invalid octal literal");
-			case Err_InvalidDecimal:
-				return _SC("invalid decimal literal");
-			case Err_InvalidU32Escape:
-				return _SC("invalid UTF32 escape");
-			case Err_InvalidU16Escape:
-				return _SC("invalid UTF16 escape");
-			case Err_InvalidXEscape:
-				return _SC("invalid hexadecimal escape");
-			case Err_InvalidOctalEscape:
-				return _SC("invalid octal escape");
-			case Err_InvalidEscape:
-				return _SC("invalid escape char");
-			case Err_UnfinishedChar:
-				return _SC("unfinished char literal");
-			case Err_UnfinishedString:
-				return _SC("unfinished string literal");
-			case Err_UnfinishedComment:
-				return _SC("unfinished block comment");
-			default:
-				return _SC("");
-		}
+		Assert( m_lastError.len != 0 );
+		return m_lastError;
 	}
 
-private:
-	ECompileReturnCode LexAll( int closer, bool jump = false )
+	void SQDebugServer::CCompiler::SetError( int err, void *data )
+	{
+		Assert( err < 0 );
+
+		fileindex_t index = ParserIndex();
+		stringbufext_t buf = m_dbg->ScratchPadBuf( 48 );
+
+		switch ( err )
+		{
+			case Err_Unsupported:
+				buf.Puts( "invalid expression" );
+				break;
+			case Err_Expected:
+				buf.Puts( "expected '" );
+				buf.Put( (char)(uintptr_t)data );
+				buf.Put( '\'' );
+				break;
+			case Err_SetFailed:
+				buf.Puts( "assignment failed" );
+				break;
+			case Err_OpFailed:
+				buf.Puts( "operator failed" );
+				break;
+			case Err_BufLim:
+				buf.Puts( "compiler buffer full" );
+				break;
+			case Err_IndexNotFound:
+				buf.Puts( "index '" );
+				buf.Puts( *(string_t*)data );
+				buf.Puts( "' does not exist" );
+				break;
+			case Err_OIndexNotFound:
+				buf.Puts( "index '" );
+				buf.Puts( m_dbg->GetValue( *(SQObjectPtr*)data ) );
+				buf.Puts( "' does not exist" );
+				break;
+			case Err_InvalidFloat:
+				buf.Puts( "invalid float literal" );
+				break;
+			case Err_InvalidBinary:
+				buf.Puts( "invalid binary literal" );
+				break;
+			case Err_InvalidHexadecimal:
+				buf.Puts( "invalid hexadecimal literal" );
+				break;
+			case Err_InvalidOctal:
+				buf.Puts( "invalid octal literal" );
+				break;
+			case Err_InvalidDecimal:
+				buf.Puts( "invalid decimal literal" );
+				break;
+			case Err_InvalidU32Escape:
+				buf.Puts( "invalid UTF32 escape" );
+				break;
+			case Err_InvalidU16Escape:
+				buf.Puts( "invalid UTF16 escape" );
+				break;
+			case Err_InvalidXEscape:
+				buf.Puts( "invalid hexadecimal escape" );
+				break;
+			case Err_InvalidOctalEscape:
+				buf.Puts( "invalid octal escape" );
+				break;
+			case Err_InvalidEscape:
+				buf.Puts( "invalid escape char" );
+				break;
+			case Err_UnfinishedChar:
+				buf.Puts( "unfinished char literal" );
+				break;
+			case Err_UnfinishedString:
+				buf.Puts( "unfinished string literal" );
+				break;
+			case Err_UnfinishedComment:
+				buf.Puts( "unfinished block comment" );
+				break;
+			default: UNREACHABLE();
+		}
+
+		buf.Puts( " @" );
+		buf.PutInt( index.col );
+
+		m_lastError.ptr = buf.ptr;
+		m_lastError.len = buf.len;
+	}
+
+	SQDebugServer::CCompiler::fileindex_t SQDebugServer::CCompiler::ParserIndex()
+	{
+		const char *c = m_expr.ptr;
+		int line = 0;
+		int col = 0;
+
+		while ( c < m_cur )
+		{
+			if ( *c == '\n' )
+			{
+				line++;
+				col = 0;
+				c++;
+			}
+			else
+			{
+				int bytes = IsValidUTF8( c, m_end - c );
+				if ( !bytes )
+					bytes = 1;
+				col++;
+				c += bytes;
+			}
+		}
+
+		return { line, col };
+	}
+
+	SQDebugServer::ECompileReturnCode SQDebugServer::CCompiler::LexAll( int closer, bool jump )
 	{
 		token_t token;
 		int prevtoken = 0;
@@ -10007,7 +10333,10 @@ private:
 				case Token_Identifier:
 				{
 					if ( !ExpectsIdentifier( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					prevtoken = Token_Ref;
 					break;
@@ -10020,7 +10349,10 @@ private:
 				case Token_True:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					prevtoken = Token_Value;
 					break;
@@ -10028,7 +10360,10 @@ private:
 				case Token_This:
 				{
 					if ( !ExpectsIdentifier( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					prevtoken = Token_Value;
 					break;
@@ -10050,6 +10385,7 @@ unary:
 							goto binary;
 						}
 
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
 					}
 
@@ -10097,7 +10433,10 @@ unary:
 binary:
 					// identifier boundary
 					if ( !IsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					prevtoken = Token_Operator;
 					break;
@@ -10106,7 +10445,10 @@ binary:
 				case Token_Decrement:
 				{
 					if ( !( prevtoken == Token_Ref || ExpectsIdentifier( prevtoken ) ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					break;
 				}
@@ -10114,7 +10456,10 @@ binary:
 				{
 					// identifier boundary
 					if ( !IsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					// HACKHACK: Exit if the previous statement is to be evaluated
 					// Breaks easily, but makes valid syntax work correctly
@@ -10145,7 +10490,10 @@ binary:
 					token = Lex();
 
 					if ( token.type != Token_Identifier )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					prevtoken = Token_Ref;
 					break;
@@ -10153,7 +10501,10 @@ binary:
 				case '.':
 				{
 					if ( !IsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					token_t next = Lex();
 
@@ -10165,11 +10516,13 @@ binary:
 							prevtoken = Token_Value;
 
 						m_lastToken.type = '.';
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
 					}
 					else if ( next.type != Token_Identifier )
 					{
 						m_lastToken.type = '.';
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
 					}
 
@@ -10180,7 +10533,10 @@ binary:
 				case '{':
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					// new table
 					for (;;)
@@ -10195,7 +10551,10 @@ binary:
 								return res;
 
 							if ( m_prevToken != ']' )
-								return CompileReturnCode_Unsupported;
+							{
+								SetError( Err_Expected, (void*)']' );
+								return CompileReturnCode_SyntaxError;
+							}
 						}
 						else if ( next.type == Token_Identifier )
 						{
@@ -10206,13 +10565,17 @@ binary:
 						}
 						else
 						{
-							return CompileReturnCode_Unsupported;
+							SetError( Err_Expected, (void*)'}' );
+							return CompileReturnCode_SyntaxError;
 						}
 
 						next = Lex();
 
 						if ( next.type != Token_Assign )
-							return CompileReturnCode_Unsupported;
+						{
+							SetError( Err_Expected, (void*)'=' );
+							return CompileReturnCode_SyntaxError;
+						}
 
 						ECompileReturnCode res = LexAll( '}' );
 
@@ -10225,7 +10588,8 @@ binary:
 						if ( m_prevToken == '}' )
 							break;
 
-						return CompileReturnCode_Unsupported;
+						SetError( Err_Expected, (void*)'}' );
+						return CompileReturnCode_SyntaxError;
 					}
 
 					prevtoken = Token_Value;
@@ -10254,7 +10618,8 @@ binary:
 							if ( m_prevToken == ']' )
 								break;
 
-							return CompileReturnCode_Unsupported;
+							SetError( Err_Expected, (void*)']' );
+							return CompileReturnCode_SyntaxError;
 						}
 
 						prevtoken = Token_Value;
@@ -10262,7 +10627,10 @@ binary:
 					}
 
 					if ( !IsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					ECompileReturnCode res = LexAll( ']' );
 
@@ -10270,7 +10638,10 @@ binary:
 						return res;
 
 					if ( m_prevToken != ']' )
-						return CompileReturnCode_Unsupported;
+					{
+						SetError( Err_Expected, (void*)']' );
+						return CompileReturnCode_SyntaxError;
+					}
 
 					prevtoken = Token_Ref;
 					break;
@@ -10285,7 +10656,10 @@ binary:
 							return res;
 
 						if ( m_prevToken != ')' )
-							return CompileReturnCode_Unsupported;
+						{
+							SetError( Err_Expected, (void*)')' );
+							return CompileReturnCode_SyntaxError;
+						}
 
 						prevtoken = Token_Value;
 						break;
@@ -10310,7 +10684,8 @@ binary:
 						if ( m_prevToken == ')' )
 							break;
 
-						return CompileReturnCode_Unsupported;
+						SetError( Err_Expected, (void*)')' );
+						return CompileReturnCode_SyntaxError;
 					}
 
 					prevtoken = Token_Value;
@@ -10319,7 +10694,10 @@ binary:
 				case Token_Delete:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					prevtoken = Token_Delete;
 					break;
@@ -10328,7 +10706,10 @@ binary:
 				case Token_Parent:
 				{
 					if ( !IsValue( prevtoken ) && !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					prevtoken = Token_Value;
 					break;
@@ -10336,12 +10717,19 @@ binary:
 				case Token_Vargv:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					token_t next = Lex();
 
 					if ( next.type != '[' )
+					{
+						string_t s( "vargv" );
+						SetError( Err_IndexNotFound, &s );
 						return CompileReturnCode_DoesNotExist;
+					}
 
 					ECompileReturnCode res = LexAll( ']' );
 
@@ -10349,7 +10737,10 @@ binary:
 						return res;
 
 					if ( m_prevToken != ']' )
+					{
+						SetError( Err_Expected, (void*)']' );
 						return CompileReturnCode_Unsupported;
+					}
 
 					prevtoken = Token_Value;
 					break;
@@ -10360,7 +10751,10 @@ binary:
 				case Token_Line:
 				{
 					if ( !ExpectsValue( prevtoken ) )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					prevtoken = Token_Value;
 					break;
@@ -10380,7 +10774,10 @@ binary:
 				case Token_NewSlot:
 				{
 					if ( prevtoken != Token_Ref )
+					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
+					}
 
 					ECompileReturnCode res = LexAll( closer );
 					return res;
@@ -10393,7 +10790,11 @@ binary:
 						m_prevToken = token.type;
 
 						if ( ExpectsValue( prevtoken ) )
+						{
+							if ( closer < 0x20 )
+								SetError( Err_Unsupported );
 							return CompileReturnCode_NoValue;
+						}
 
 						switch ( token.type )
 						{
@@ -10441,15 +10842,26 @@ binary:
 							}
 						}
 
+						if ( closer < 0x20 )
+						{
+							SetError( Err_Unsupported );
+						}
+						else
+						{
+							SetError( Err_Expected, (void*)(uintptr_t)closer );
+						}
+
 						return CompileReturnCode_Unsupported;
 					}
 					else if ( token.type == Err_InvalidToken )
 					{
+						SetError( Err_Unsupported );
 						return CompileReturnCode_Unsupported;
 					}
 					else
 					{
 						m_prevToken = token.type;
+						SetError( token.type );
 						return CompileReturnCode_SyntaxError;
 					}
 				}
@@ -10457,8 +10869,7 @@ binary:
 		}
 	}
 
-private:
-	static bool IsValue( int token )
+	bool SQDebugServer::CCompiler::IsValue( int token )
 	{
 		switch ( token )
 		{
@@ -10472,7 +10883,7 @@ private:
 		}
 	}
 
-	static bool ExpectsValue( int token )
+	bool SQDebugServer::CCompiler::ExpectsValue( int token )
 	{
 		switch ( token )
 		{
@@ -10486,7 +10897,7 @@ private:
 		}
 	}
 
-	static bool ExpectsIdentifier( int token )
+	bool SQDebugServer::CCompiler::ExpectsIdentifier( int token )
 	{
 		switch ( token )
 		{
@@ -10501,7 +10912,7 @@ private:
 		}
 	}
 
-	static bool BinaryOp( SQDebugServer *dbg,
+	bool SQDebugServer::CCompiler::BinaryOp( SQDebugServer *dbg,
 			int op, const SQObjectPtr &lhs, const SQObjectPtr &rhs, SQObjectPtr &out )
 	{
 		Assert( ( op & _op ) == _op );
@@ -10754,7 +11165,7 @@ private:
 		}
 	}
 
-	static bool UnaryOp( SQDebugServer *dbg, int op, SQObjectPtr &val )
+	bool SQDebugServer::CCompiler::UnaryOp( SQDebugServer *dbg, int op, SQObjectPtr &val )
 	{
 		Assert( ( op & _op ) == _op );
 
@@ -10896,8 +11307,7 @@ private:
 		}
 	}
 
-private:
-	int Next()
+	int SQDebugServer::CCompiler::Next()
 	{
 		while ( m_cur < m_end )
 		{
@@ -11169,7 +11579,7 @@ private:
 		return Token_End;
 	}
 
-	token_t Lex()
+	SQDebugServer::CCompiler::token_t SQDebugServer::CCompiler::Lex()
 	{
 		token_t token;
 
@@ -11618,7 +12028,7 @@ private:
 		return token;
 	}
 
-	bool LexBlockComment()
+	bool SQDebugServer::CCompiler::LexBlockComment()
 	{
 		for (;;)
 		{
@@ -11630,7 +12040,7 @@ private:
 		}
 	}
 
-	void ParseString( token_t &token )
+	void SQDebugServer::CCompiler::ParseString( SQDebugServer::CCompiler::token_t &token )
 	{
 		char *pStart = ++m_cur;
 
@@ -11663,11 +12073,13 @@ private:
 			}
 
 #define _shift( bytesWritten, bytesRead ) \
+do { \
 	Assert( (bytesWritten) < (bytesRead) ); \
 	memmove( m_cur + (bytesWritten), m_cur + (bytesRead), m_end - ( m_cur + (bytesRead) ) ); \
 	m_cur += (bytesWritten); \
 	m_end -= (bytesRead) - (bytesWritten); \
-	m_expr.len -= (bytesRead) - (bytesWritten);
+	m_expr.len -= (bytesRead) - (bytesWritten); \
+} while (0)
 
 			switch ( m_cur[1] )
 			{
@@ -11894,7 +12306,7 @@ shift_one:
 		}
 	}
 
-	void ParseChar( token_t &token )
+	void SQDebugServer::CCompiler::ParseChar( SQDebugServer::CCompiler::token_t &token )
 	{
 		m_cur++;
 
@@ -12003,7 +12415,7 @@ shift_one:
 		}
 	}
 
-	void ParseNumber( token_t &token )
+	void SQDebugServer::CCompiler::ParseNumber( SQDebugServer::CCompiler::token_t &token )
 	{
 		const char *pStart = m_cur;
 		static const int DECIMAL = 0;
@@ -12088,13 +12500,19 @@ shift_one:
 
 					for ( int i = str.len - 1; i >= 2; i-- )
 					{
-						switch ( str.ptr[i] )
+						char ch = str.ptr[i];
+
+						if ( ch == '1' )
 						{
-							case '1':
-								token._integer |= ( (SQUnsignedInteger)1 << ( ( inputbitlen - 1 ) - ( i - 2 ) ) );
-							case '0':
-								continue;
-							default: UNREACHABLE();
+							token._integer |= ( (SQUnsignedInteger)1 << ( ( inputbitlen - 1 ) - ( i - 2 ) ) );
+						}
+						else if ( ch == '0' )
+						{
+							continue;
+						}
+						else
+						{
+							UNREACHABLE();
 						}
 					}
 
@@ -12154,6 +12572,7 @@ shift_one:
 			if ( m_cur >= m_end )
 			{
 				token.type = Err_InvalidFloat;
+				SetError( Err_InvalidFloat );
 				return;
 			}
 
@@ -12213,24 +12632,6 @@ shift_one:
 			default: UNREACHABLE();
 		}
 	}
-};
-
-SQDebugServer::ECompileReturnCode SQDebugServer::Evaluate( string_t &expression,
-		HSQUIRRELVM vm, int frame, SQObjectPtr &ret )
-{
-	CCompiler c( expression );
-	ECompileReturnCode r = c.Evaluate( this, vm, frame, ret );
-	return r;
-}
-
-SQDebugServer::ECompileReturnCode SQDebugServer::Evaluate( string_t &expression,
-		HSQUIRRELVM vm, const SQVM::CallInfo *ci, SQObjectPtr &ret, objref_t &obj )
-{
-	CCompiler c( expression );
-	ECompileReturnCode r = c.Evaluate( this, vm, ci ? ci - vm->_callsstack : INVALID_FRAME, ret );
-	obj = c.m_lastRef;
-	return r;
-}
 
 SQTable *SQDebugServer::GetDefaultDelegate( HSQUIRRELVM vm, SQObjectType type )
 {
@@ -12387,7 +12788,10 @@ bool SQDebugServer::ArithOp( char op, const SQObjectPtr &lhs, const SQObjectPtr 
 		}
 
 		if ( len <= 0 )
-			return false;
+		{
+			out = SQString::Create( _ss(m_pRootVM), _SC(""), 0 );
+			return true;
+		}
 
 		if ( (unsigned int)sq_rsl(len) > (unsigned int)INT_MAX )
 		{
@@ -12654,7 +13058,7 @@ bool SQDebugServer::GetObj_Var( const SQObjectPtr &var, string_t &expression, bo
 				expression.len -= 2;
 
 #ifdef SQUNICODE
-				int len = sq_rsl( SQUnicodeLength< true >( expression.ptr, expression.len ) + 1 );
+				int len = sq_rsl( SQUnicodeLength< true >( expression.ptr, expression.len ) );
 
 				CScratch_Restore_Auto _sr( &m_Scratch );
 				SQChar *tmp = (SQChar*)ScratchPad( len );
@@ -12663,7 +13067,6 @@ bool SQDebugServer::GetObj_Var( const SQObjectPtr &var, string_t &expression, bo
 					return false;
 
 				len = UTF8ToSQUnicode< true >( tmp, len, expression.ptr, expression.len );
-				tmp[len] = 0;
 				identifier = SQString::Create( _ss(m_pRootVM), tmp, len );
 #else
 				UndoEscape( expression.ptr, &expression.len );
@@ -13186,6 +13589,29 @@ bool SQDebugServer::GetObj_VarRef( const varref_t *ref, string_t &expression, ob
 			value = *out.ptr;
 			return true;
 		}
+		case VARREF_ATTRIBUTES:
+		{
+			SQObject target = ref->GetVar();
+
+			AssertClient( sq_type(target) == OT_CLASS );
+
+			SQObjectPtr idx;
+			if ( sq_type(target) == OT_CLASS &&
+					GetObj_Var( _class(target)->_members, expression, !ref->obj.hasNonStringMembers, out, idx ) )
+			{
+				out.Reset();
+				Assert( sq_type(idx) == OT_INTEGER );
+
+				out.type = objref_t::PTR;
+				out.ptr = _isfield(idx) ?
+					&_class(target)->_defaultvalues[ _member_idx(idx) ].attrs :
+					&_class(target)->_methods[ _member_idx(idx) ].attrs;
+				value = *out.ptr;
+				return true;
+			}
+
+			return false;
+		}
 		case VARREF_INSTRUCTIONS:
 		case VARREF_CALLSTACK:
 		case VARREF_BREAKPOINT:
@@ -13283,14 +13709,19 @@ bool SQDebugServer::ParseBinaryNumber( const string_t &value, SQObject &out )
 
 	for ( int i = value.len - 1; i >= 2; i-- )
 	{
-		switch ( value.ptr[i] )
+		char ch = value.ptr[i];
+
+		if ( ch == '1' )
 		{
-			case '1':
-				out._unVal.nInteger |= ( (SQUnsignedInteger)1 << ( ( inputbitlen - 1 ) - ( i - 2 ) ) );
-			case '0':
-				continue;
-			default:
-				return false;
+			out._unVal.nInteger |= ( (SQUnsignedInteger)1 << ( ( inputbitlen - 1 ) - ( i - 2 ) ) );
+		}
+		else if ( ch == '0' )
+		{
+			continue;
+		}
+		else
+		{
+			return false;
 		}
 	}
 
@@ -13304,7 +13735,7 @@ int SQDebugServer::ParseFormatSpecifiers( string_t &expression, char **ppComma )
 
 	int flags = 0;
 
-	// 7 flags at most ",*lnax0b\0"
+	// 7 flags at most ",*lnax8b\0"
 	char *start = expression.ptr + expression.len - 9;
 	char *end = expression.ptr + expression.len;
 	char *c = end - 1;
@@ -13376,12 +13807,24 @@ check:
 
 					break;
 				case 'n':
-					if ( flags & kFS_NoAddr )
-						return 0;
-
-					if ( c < end && *c++ == 'a' )
+					if ( c < end )
 					{
-						flags |= kFS_NoAddr;
+						char ch = *c++;
+
+						if ( ch == 'a' )
+						{
+							if ( flags & kFS_NoAddr )
+								return 0;
+
+							flags |= kFS_NoAddr;
+						}
+						else if ( ch == 'q' )
+						{
+							if ( flags & kFS_NoQuote )
+								return 0;
+
+							flags |= kFS_NoQuote;
+						}
 
 						if ( c < end )
 							goto check;
@@ -13394,20 +13837,59 @@ check:
 			// modifier
 			if ( ( flags & ( kFS_Hexadecimal | kFS_Binary ) ) && c < end )
 			{
-				switch ( *c++ )
-				{
-					case '0': flags |= kFS_Padding; break;
-					case 'b': flags |= kFS_NoPrefix; break;
-					default: return 0;
-				}
+				char ch = *c++;
 
-				if ( ( flags & kFS_Padding ) && c < end )
+				if ( ch == 'b' )
 				{
-					switch ( *c++ )
+					flags |= kFS_NoPrefix;
+				}
+				else if ( IN_RANGE_CHAR( ch, '0', '9' ) )
+				{
+					flags |= kFS_Padding;
+
+					unsigned int numlen = 1;
+					while ( c < end && IN_RANGE_CHAR( *c, '0', '9' ) )
 					{
-						case 'b': flags |= kFS_NoPrefix; break;
-						default: return 0;
+						c++;
+						numlen++;
 					}
+
+					int num;
+					Verify( atoi( { c - numlen, numlen }, &num ) );
+
+					if ( !num )
+					{
+						num = -1;
+					}
+					else if ( num > 8 )
+					{
+						return 0;
+					}
+					else
+					{
+						num *= 8;
+					}
+
+					// Use the unused upper 8 bits
+					flags |= num << 24;
+
+					if ( c < end )
+					{
+						ch = *c++;
+
+						if ( ch == 'b' )
+						{
+							flags |= kFS_NoPrefix;
+						}
+						else
+						{
+							return 0;
+						}
+					}
+				}
+				else
+				{
+					return 0;
 				}
 			}
 
@@ -13620,7 +14102,8 @@ void SQDebugServer::OnRequest_Evaluate( const json_table_t &arguments, int seq )
 		}
 
 #ifndef SQDBG_DISABLE_COMPILER
-		ECompileReturnCode cres = Evaluate( expression, vm, frame, res );
+		CCompiler c( this, expression );
+		ECompileReturnCode cres = c.Evaluate( vm, frame, res );
 
 		if ( cres == CompileReturnCode_Success )
 		{
@@ -13679,7 +14162,14 @@ void SQDebugServer::OnRequest_Evaluate( const json_table_t &arguments, int seq )
 			}
 
 			DAP_ERROR_RESPONSE( seq, "evaluate" );
-			DAP_ERROR_BODY( 0, "could not evaluate expression" );
+			DAP_ERROR_BODY( 0, "{reason}" );
+				wjson_table_t variables = error.SetTable( "variables" );
+#ifndef SQDBG_DISABLE_COMPILER
+				if ( cres != CompileReturnCode_CallError )
+					variables.SetString( "reason", c.LastError() );
+				else
+#endif
+					JSONSetString( variables, "reason", vm->_lasterror, kFS_NoQuote );
 			DAP_SEND();
 		}
 	}
@@ -13695,26 +14185,23 @@ void SQDebugServer::OnRequest_Evaluate( const json_table_t &arguments, int seq )
 			if ( context.IsEqualTo( "repl" ) )
 				flags |= ParseFormatSpecifiers( expression );
 
-			CCompiler c( expression );
-			ECompileReturnCode cres = c.Evaluate( this, vm, frame, res );
+			CCompiler c( this, expression );
+			ECompileReturnCode cres = c.Evaluate( vm, frame, res );
 
-			switch ( cres )
+			if ( cres == CompileReturnCode_Success )
 			{
-				case CompileReturnCode_Success:
-					success = true;
-					break;
-				case CompileReturnCode_DoesNotExist:
-					vm->_lasterror = CreateSQString( vm, _SC("index does not exist") );
-					success = false;
-					break;
-				case CompileReturnCode_SyntaxError:
-					vm->_lasterror = CreateSQString( vm, c.LastError() );
-				case CompileReturnCode_CallError:
-					success = false;
-					break;
-				default:
-					Assert( cres > CompileReturnCode_Fallback );
-					success = RunExpression( expression, vm, frame, res );
+				success = true;
+			}
+			else if ( cres < CompileReturnCode_Fallback )
+			{
+				if ( cres != CompileReturnCode_CallError )
+					vm->_lasterror = CreateSQString( this, c.LastError() );
+
+				success = false;
+			}
+			else
+			{
+				success = RunExpression( expression, vm, frame, res );
 			}
 		}
 		else
@@ -13790,8 +14277,8 @@ void SQDebugServer::OnRequest_Completions( const json_table_t &arguments, int se
 	SQObjectPtr target;
 
 	string_t expr( text.ptr, column );
-	CCompiler c( expr );
-	ECompileReturnCode r = c.Evaluate( this, vm, frame, target );
+	CCompiler c( this, expr );
+	ECompileReturnCode r = c.Evaluate( vm, frame, target );
 
 	CCompiler::token_t token = c.m_lastToken;
 
@@ -14707,10 +15194,10 @@ static inline void SortKeys( SQTable *table,
 
 static inline void SortKeys( SQClass *pClass,
 		int *nAttributes,
-		vector_fixed< SQObjectPtr > *values,
-		vector_fixed< SQObjectPtr > *methods,
+		vector_fixed< SQObjectPtr > *keys,
 		bool *hasNonStringMembers )
 {
+	int nFieldCount = 0;
 	bool nsm = false;
 	*nAttributes = 0;
 
@@ -14734,11 +15221,11 @@ static inline void SortKeys( SQClass *pClass,
 
 		if ( _isfield(idx) )
 		{
-			values->Append( key );
+			keys->Insert( nFieldCount++, key );
 		}
 		else
 		{
-			methods->Append( key );
+			keys->Append( key );
 		}
 
 		const SQObjectPtr &attr = _isfield(idx) ?
@@ -14752,11 +15239,17 @@ static inline void SortKeys( SQClass *pClass,
 			nsm = _checkNonStringMembers( key );
 	}
 
-	if ( values->Size() )
-		values->Sort( _sortkeys );
+	if ( nFieldCount )
+	{
+		qsort( keys->Base(), nFieldCount,
+				sizeof(SQObjectPtr), (int (*)(const void *, const void *))_sortkeys );
+	}
 
-	if ( methods->Size() )
-		methods->Sort( _sortkeys );
+	if ( keys->Size() - nFieldCount )
+	{
+		qsort( keys->Base() + nFieldCount, keys->Size() - nFieldCount,
+				sizeof(SQObjectPtr), (int (*)(const void *, const void *))_sortkeys );
+	}
 
 	*hasNonStringMembers = nsm;
 }
@@ -14797,7 +15290,7 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 	if ( !ref )
 	{
 		DAP_ERROR_RESPONSE( seq, "variables" );
-		DAP_ERROR_BODY( 0, "failed to find variable" );
+		DAP_ERROR_BODY( 0, "could not find variable" );
 		DAP_SEND();
 		return;
 	}
@@ -15128,14 +15621,13 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 					SetVirtualHint( elem );
 				}
 
-				bool shouldQuoteKeys;
-
 				// members
 				switch ( sq_type(target) )
 				{
 					case OT_TABLE:
 					{
 						int keyflags = flags | kFS_NoQuote | kFS_KeyVal;
+						bool shouldQuoteKeys;
 
 						Assert( _table(target)->CountUsed() <= INT_MAX );
 
@@ -15188,6 +15680,7 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 					case OT_CLASS:
 					{
 						int keyflags = flags | kFS_NoQuote | kFS_KeyVal;
+						bool shouldQuoteKeys;
 						int nAttributes;
 
 						Assert( _class(target)->_members );
@@ -15196,13 +15689,9 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 						unsigned int size = _class(target)->_members->CountUsed() * sizeof(SQObjectPtr);
 
 						CScratch_Restore_Auto _sr( &m_Scratch );
-						// Lazy way to ensure there is enough memory for values & methods
-						char *ptr = m_Scratch.Alloc( size * 2 );
+						vector_fixed< SQObjectPtr > keys( m_Scratch.Alloc( size ), size );
 
-						vector_fixed< SQObjectPtr > values( (void*)ptr, size );
-						vector_fixed< SQObjectPtr > methods( (void*)( ptr + size ), size );
-
-						SortKeys( _class(target), &nAttributes, &values, &methods, &shouldQuoteKeys );
+						SortKeys( _class(target), &nAttributes, &keys, &shouldQuoteKeys );
 
 						ref->obj.hasNonStringMembers = shouldQuoteKeys;
 
@@ -15226,35 +15715,9 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 							SetVirtualHint( elem );
 						}
 
-						for ( unsigned int i = 0; i < values.Size(); i++ )
+						for ( unsigned int i = 0; i < keys.Size(); i++ )
 						{
-							const SQObjectPtr &key = values[i];
-							SQObjectPtr val;
-							_class(target)->Get( key, val );
-
-							wjson_table_t elem = variables.AppendTable();
-
-							if ( shouldQuoteKeys && sq_type(key) == OT_INTEGER )
-							{
-								elem.SetIntBrackets( "name", _integer(key), ( keyflags & kFS_Hexadecimal ) != 0 );
-							}
-							else
-							{
-								JSONSetString( elem, "name", key, keyflags );
-							}
-
-							JSONSetString( elem, "value", val, flags );
-							elem.SetString( "type", GetType( val ) );
-							elem.SetInt( "variablesReference", ToVarRef( val ) );
-							if ( ShouldPageArray( val, 16 * ARRAY_PAGE_LIMIT ) )
-								elem.SetInt( "indexedVariables", (int)_array(val)->_values.size() );
-							wjson_table_t hint = elem.SetTable( "presentationHint" );
-							hint.SetString( "kind", GetPresentationHintKind( val ) );
-						}
-
-						for ( unsigned int i = 0; i < methods.Size(); i++ )
-						{
-							const SQObjectPtr &key = methods[i];
+							const SQObjectPtr &key = keys[i];
 							SQObjectPtr val;
 							_class(target)->Get( key, val );
 
@@ -15283,6 +15746,8 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 					case OT_INSTANCE:
 					{
 						int keyflags = flags | kFS_NoQuote | kFS_KeyVal;
+						bool shouldQuoteKeys;
+
 						SQClass *base = _instance(target)->_class;
 
 						Assert( base );
@@ -15445,6 +15910,7 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 						SQFunctionProto *func = _fp(_closure(target)->_function);
 #endif
 
+						Assert( func->_ninstructions > 0 );
 						Assert( func->_ninstructions <= INT_MAX );
 						Assert( func->GetLine( &func->_instructions[ func->_ninstructions - 1 ] ) <= INT_MAX );
 						Assert( func->_nliterals <= INT_MAX );
@@ -16117,58 +16583,6 @@ obj_done:;
 
 			break;
 		}
-		case VARREF_ATTRIBUTES:
-		{
-			SQObject target = ref->GetVar();
-			bool shouldQuoteKeys = ref->obj.hasNonStringMembers;
-
-			if ( sq_type(target) != OT_CLASS )
-			{
-				DAP_ERROR_RESPONSE( seq, "variables" );
-				DAP_ERROR_BODY( 0, "invalid object" );
-				DAP_SEND();
-				return;
-			}
-
-			int keyflags = flags | kFS_NoQuote | kFS_KeyVal;
-			if ( shouldQuoteKeys )
-				keyflags &= ~kFS_NoQuote;
-
-			DAP_START_RESPONSE( seq, "variables" );
-			DAP_SET_TABLE( body );
-				wjson_array_t variables = body.SetArray( "variables" );
-
-				SQObjectPtr key, idx;
-				FOREACH_SQTABLE( _class(target)->_members, key, idx )
-				{
-					const SQObjectPtr &val = _isfield(idx) ?
-						_class(target)->_defaultvalues[ _member_idx(idx) ].attrs :
-						_class(target)->_methods[ _member_idx(idx) ].attrs;
-
-					if ( sq_type(val) != OT_NULL )
-					{
-						wjson_table_t elem = variables.AppendTable();
-
-						if ( shouldQuoteKeys && sq_type(key) == OT_INTEGER )
-						{
-							elem.SetIntBrackets( "name", _integer(key), ( keyflags & kFS_Hexadecimal ) != 0 );
-						}
-						else
-						{
-							JSONSetString( elem, "name", key, keyflags );
-						}
-
-						JSONSetString( elem, "value", val, flags );
-						elem.SetString( "type", GetType( val ) );
-						elem.SetInt( "variablesReference", ToVarRef( val ) );
-						wjson_table_t hint = elem.SetTable( "presentationHint" );
-						hint.SetString( "kind", GetPresentationHintKind( val ) );
-					}
-				}
-			DAP_SEND();
-
-			break;
-		}
 		case VARREF_CALLSTACK:
 		{
 			SQObject target = ref->GetVar();
@@ -16229,6 +16643,11 @@ obj_done:;
 
 			break;
 		}
+		case VARREF_ATTRIBUTES:
+		{
+			OnRequest_Variables_Attributes( ref, flags, seq );
+			break;
+		}
 		case VARREF_STACK:
 		{
 			HSQUIRRELVM vm = ref->GetThread();
@@ -16257,6 +16676,71 @@ obj_done:;
 		}
 		default: UNREACHABLE();
 	}
+}
+
+void SQDebugServer::OnRequest_Variables_Attributes( varref_t *ref, int flags, int seq )
+{
+	SQObject target = ref->GetVar();
+
+	if ( sq_type(target) != OT_CLASS )
+	{
+		DAP_ERROR_RESPONSE( seq, "variables" );
+		DAP_ERROR_BODY( 0, "invalid object" );
+		DAP_SEND();
+		return;
+	}
+
+	int keyflags = flags | kFS_NoQuote | kFS_KeyVal;
+	bool shouldQuoteKeys;
+	int nAttributes;
+
+	unsigned int size = _class(target)->_members->CountUsed() * sizeof(SQObjectPtr);
+
+	CScratch_Restore_Auto _sr( &m_Scratch );
+	vector_fixed< SQObjectPtr > keys( m_Scratch.Alloc( size ), size );
+
+	SortKeys( _class(target), &nAttributes, &keys, &shouldQuoteKeys );
+
+	ref->obj.hasNonStringMembers = shouldQuoteKeys;
+
+	if ( shouldQuoteKeys )
+		keyflags &= ~kFS_NoQuote;
+
+	DAP_START_RESPONSE( seq, "variables" );
+	DAP_SET_TABLE( body );
+		wjson_array_t variables = body.SetArray( "variables" );
+
+		for ( unsigned int i = 0; i < keys.Size(); i++ )
+		{
+			const SQObjectPtr &key = keys[i];
+			SQObjectPtr idx;
+			_class(target)->_members->Get( key, idx );
+
+			const SQObjectPtr &val = _isfield(idx) ?
+				_class(target)->_defaultvalues[ _member_idx(idx) ].attrs :
+				_class(target)->_methods[ _member_idx(idx) ].attrs;
+
+			if ( sq_type(val) == OT_NULL )
+				continue;
+
+			wjson_table_t elem = variables.AppendTable();
+
+			if ( shouldQuoteKeys && sq_type(key) == OT_INTEGER )
+			{
+				elem.SetIntBrackets( "name", _integer(key), ( keyflags & kFS_Hexadecimal ) != 0 );
+			}
+			else
+			{
+				JSONSetString( elem, "name", key, keyflags );
+			}
+
+			JSONSetString( elem, "value", val, flags );
+			elem.SetString( "type", GetType( val ) );
+			elem.SetInt( "variablesReference", ToVarRef( val ) );
+			wjson_table_t hint = elem.SetTable( "presentationHint" );
+			hint.SetString( "kind", GetPresentationHintKind( val ) );
+		}
+	DAP_SEND();
 }
 
 void SQDebugServer::DumpStack( HSQUIRRELVM vm, int frame, int flags, wjson_array_t &variables )
@@ -16464,17 +16948,24 @@ void SQDebugServer::OnRequest_SetVariable( const json_table_t &arguments, int se
 	arguments.GetString( "name", &strName );
 	arguments.GetString( "value", &strValue );
 
-	bool hex = false;
-	json_table_t *format;
-	if ( arguments.GetTable( "format", &format ) )
-		format->GetBool( "hex", &hex );
+	int flags = 0;
+	{
+		json_table_t *format;
+		if ( arguments.GetTable( "format", &format ) )
+		{
+			bool hex;
+			format->GetBool( "hex", &hex );
+			if ( hex )
+				flags |= kFS_Hexadecimal;
+		}
+	}
 
 	varref_t *ref = FromVarRef( variablesReference );
 
 	if ( !ref )
 	{
 		DAP_ERROR_RESPONSE( seq, "setVariable" );
-		DAP_ERROR_BODY( 0, "failed to find variable" );
+		DAP_ERROR_BODY( 0, "could not find variable" );
 		DAP_SEND();
 		return;
 	}
@@ -16542,7 +17033,8 @@ void SQDebugServer::OnRequest_SetVariable( const json_table_t &arguments, int se
 	}
 
 #ifndef SQDBG_DISABLE_COMPILER
-	ECompileReturnCode cres = Evaluate( strValue, vm, frame, value );
+	CCompiler c( this, strValue );
+	ECompileReturnCode cres = c.Evaluate( vm, frame, value );
 
 	if ( cres != CompileReturnCode_Success &&
 			!( cres > CompileReturnCode_Fallback && RunExpression( strValue, vm, frame, value ) ) )
@@ -16551,11 +17043,16 @@ void SQDebugServer::OnRequest_SetVariable( const json_table_t &arguments, int se
 #endif
 	{
 		DAP_ERROR_RESPONSE( seq, "setVariable" );
-		DAP_ERROR_BODY( 0, "failed to evaluate value '{name}'\\n[{reason}]" );
+		DAP_ERROR_BODY( 0, "could not evaluate value '{name}'\\n[{reason}]" );
 			error.SetBool( "showUser", true );
 			wjson_table_t variables = error.SetTable( "variables" );
 			variables.SetString( "name", strValue );
-			JSONSetString( variables, "reason", vm->_lasterror, kFS_NoQuote );
+#ifndef SQDBG_DISABLE_COMPILER
+			if ( cres != CompileReturnCode_CallError )
+				variables.SetString( "reason", c.LastError() );
+			else
+#endif
+				JSONSetString( variables, "reason", vm->_lasterror, kFS_NoQuote );
 		DAP_SEND();
 		return;
 	}
@@ -16589,7 +17086,7 @@ void SQDebugServer::OnRequest_SetVariable( const json_table_t &arguments, int se
 
 	DAP_START_RESPONSE( seq, "setVariable" );
 	DAP_SET_TABLE( body );
-		JSONSetString( body, "value", value, hex ? kFS_Hexadecimal : 0 );
+		JSONSetString( body, "value", value, flags );
 		body.SetString( "type", GetType( value ) );
 		body.SetInt( "variablesReference", ToVarRef( value ) );
 		if ( ShouldPageArray( value, 16 * ARRAY_PAGE_LIMIT ) )
@@ -16653,7 +17150,7 @@ void SQDebugServer::OnRequest_SetVariable_Instruction( const varref_t *ref,
 	if ( fail )
 	{
 		DAP_ERROR_RESPONSE( seq, "setVariable" );
-		DAP_ERROR_BODY( 0, "invalid amount of parameters in input" );
+		DAP_ERROR_BODY( 0, "invalid input" );
 			error.SetBool( "showUser", true );
 		DAP_SEND();
 		return;
@@ -16679,7 +17176,7 @@ void SQDebugServer::OnRequest_SetVariable_Instruction( const varref_t *ref,
 	if ( index >= func->_ninstructions )
 	{
 		DAP_ERROR_RESPONSE( seq, "setVariable" );
-		DAP_ERROR_BODY( 0, "failed to set instruction" );
+		DAP_ERROR_BODY( 0, "could not set instruction" );
 			error.SetBool( "showUser", true );
 		DAP_SEND();
 		return;
@@ -16831,7 +17328,8 @@ void SQDebugServer::OnRequest_SetExpression( const json_table_t &arguments, int 
 
 	// Evaluate value in current stack frame even if the expression has frame lock
 #ifndef SQDBG_DISABLE_COMPILER
-	ECompileReturnCode cres = Evaluate( strValue, vm, frame, value );
+	CCompiler c1( this, strValue );
+	ECompileReturnCode cres = c1.Evaluate( vm, frame, value );
 
 	if ( cres != CompileReturnCode_Success &&
 			!( cres > CompileReturnCode_Fallback && RunExpression( strValue, vm, frame, value ) ) )
@@ -16841,10 +17339,16 @@ void SQDebugServer::OnRequest_SetExpression( const json_table_t &arguments, int 
 #endif
 	{
 		DAP_ERROR_RESPONSE( seq, "setExpression" );
-		DAP_ERROR_BODY( 0, "failed to evaluate value '{name}'" );
+		DAP_ERROR_BODY( 0, "could not evaluate value '{name}'\\n[{reason}]" );
 			error.SetBool( "showUser", true );
 			wjson_table_t variables = error.SetTable( "variables" );
 			variables.SetString( "name", strValue );
+#ifndef SQDBG_DISABLE_COMPILER
+			if ( cres != CompileReturnCode_CallError )
+				variables.SetString( "reason", c1.LastError() );
+			else
+#endif
+				JSONSetString( variables, "reason", vm->_lasterror, kFS_NoQuote );
 		DAP_SEND();
 		return;
 	}
@@ -16965,7 +17469,8 @@ void SQDebugServer::OnRequest_SetExpression( const json_table_t &arguments, int 
 		string_t expr;
 		expr.Assign( buf.ptr, buf.len );
 
-		cres = Evaluate( expr, vm, frame, value );
+		CCompiler c2( this, expr );
+		cres = c2.Evaluate( vm, frame, value );
 
 		if ( cres == CompileReturnCode_Success ||
 				( cres > CompileReturnCode_Fallback && RunExpression( buf, vm, frame, value ) ) )
@@ -16985,12 +17490,17 @@ void SQDebugServer::OnRequest_SetExpression( const json_table_t &arguments, int 
 		else
 		{
 			DAP_ERROR_RESPONSE( seq, "setExpression" );
-			DAP_ERROR_BODY( 0, "failed to evaluate expression: {exp} = {val}\\n[{reason}]" );
+			DAP_ERROR_BODY( 0, "could not evaluate expression: {exp} = {val}\\n[{reason}]" );
 				error.SetBool( "showUser", true );
 				wjson_table_t variables = error.SetTable( "variables" );
 				variables.SetString( "exp", expression );
 				variables.SetString( "val", strValue );
-				JSONSetString( variables, "reason", vm->_lasterror, kFS_NoQuote );
+#ifndef SQDBG_DISABLE_COMPILER
+				if ( cres != CompileReturnCode_CallError )
+					variables.SetString( "reason", c2.LastError() );
+				else
+#endif
+					JSONSetString( variables, "reason", vm->_lasterror, kFS_NoQuote );
 			DAP_SEND();
 			return;
 		}
@@ -18111,7 +18621,7 @@ int SQDebugServer::AddBreakpoint( int line, const string_t &src,
 
 	Assert( m_nBreakpointIndex < INT_MAX );
 
-	bp = &m_Breakpoints.Insert( m_nFunctionBreakpointsIdx++ );
+	bp = m_Breakpoints.Insert( m_nFunctionBreakpointsIdx++ );
 	bp->id = ++m_nBreakpointIndex;
 	CopyString( &m_Strings, src, &bp->src );
 
@@ -18678,7 +19188,7 @@ sqstring_t SQDebugServer::PrintDisassembly( SQClosure *target, SQChar *scratch, 
 					if ( def && def->name.ptr )
 					{
 						str = GetType( val );
-						len = min( (int)str.len, DISASM_MAX_PARAM_NAME_LEN - 4 );
+						len = min( str.len, DISASM_MAX_PARAM_NAME_LEN - 4 );
 #ifdef SQUNICODE
 						UTF8ToSQUnicode( buf, _bs, str.ptr, len );
 #else
@@ -18688,7 +19198,7 @@ sqstring_t SQDebugServer::PrintDisassembly( SQClosure *target, SQChar *scratch, 
 						*buf++ = ' ';
 
 						str.Assign( def->name.ptr + FMT_PTR_LEN + 1, def->name.len - FMT_PTR_LEN - 1 );
-						len = min( (int)str.len, DISASM_MAX_PARAM_NAME_LEN - 4 - len );
+						len = min( str.len, DISASM_MAX_PARAM_NAME_LEN - 4 - (unsigned int)len );
 						break;
 					}
 				}
@@ -19394,7 +19904,8 @@ int SQDebugServer::EvalAndWriteExpr( HSQUIRRELVM vm, int frame, string_t &expres
 	tmpbuf.Term();
 	string_t tmp = tmpbuf;
 
-	ECompileReturnCode cres = Evaluate( tmp, vm, frame, value );
+	CCompiler c( this, tmp );
+	ECompileReturnCode cres = c.Evaluate( vm, frame, value );
 
 	if ( cres == CompileReturnCode_Success )
 #else
@@ -19420,13 +19931,14 @@ int SQDebugServer::EvalAndWriteExpr( HSQUIRRELVM vm, int frame, string_t &expres
 	return 0;
 }
 
-void SQDebugServer::TracePoint( breakpoint_t *bp, HSQUIRRELVM vm, int frame )
+void SQDebugServer::TracePoint( string_t &message, int hits, int hitsTarget, HSQUIRRELVM vm, int frame,
+			const SQObjectPtr *oldvalue, const SQObjectPtr *newvalue )
 {
 	char buf[512];
 	const int bufsize = sizeof(buf) - 2; // \n\0
-	int readlen = min( (int)bp->logMessage.len, bufsize );
+	int readlen = min( message.len, (unsigned int)bufsize );
 	char *pWrite = buf;
-	char *logMessage = bp->logMessage.ptr;
+	char *logMessage = message.ptr;
 
 	// if logMessage is surrounded with {/ and },
 	// evaluate the expression but don't print.
@@ -19609,11 +20121,41 @@ exit:;
 
 					// lazy hack, hit count was reset after hitting the target
 					// if this count is to ignore hit target, keep trace hit count separately
-					int hits = bp->hits ? bp->hits : bp->hitsTarget;
+					int n = hits ? hits : hitsTarget;
 
 					int remaining = bufsize - ( pWrite - buf );
-					int writelen = printint( pWrite, remaining, hits );
+					int writelen = printint( pWrite, remaining, n );
 					pWrite += writelen;
+					break;
+				}
+				else if ( CHECK_KEYWORD("OLDVALUE") )
+				{
+					iRead += STRLEN("OLDVALUE");
+
+					if ( oldvalue )
+					{
+						string_t str = GetValue( *oldvalue );
+						int remaining = bufsize - ( pWrite - buf );
+						int writelen = min( str.len, (unsigned int)remaining );
+						memcpy( pWrite, str.ptr, writelen );
+						pWrite += writelen;
+					}
+
+					break;
+				}
+				else if ( CHECK_KEYWORD("NEWVALUE") )
+				{
+					iRead += STRLEN("NEWVALUE");
+
+					if ( newvalue )
+					{
+						string_t str = GetValue( *newvalue );
+						int remaining = bufsize - ( pWrite - buf );
+						int writelen = min( str.len, (unsigned int)remaining );
+						memcpy( pWrite, str.ptr, writelen );
+						pWrite += writelen;
+					}
+
 					break;
 				}
 				// else fallthrough
@@ -20123,7 +20665,7 @@ void SQDebugServer::DebugHook( HSQUIRRELVM vm, int type,
 				{
 					// Variable evaluation can reallocate call stack
 					int frame = ci - vm->_callsstack;
-					TracePoint( bp, vm, frame );
+					TracePoint( bp->logMessage, bp->hits, bp->hitsTarget, vm, frame );
 				}
 			}
 
@@ -20263,7 +20805,7 @@ void SQDebugServer::DebugHook( HSQUIRRELVM vm, int type,
 				{
 					// Variable evaluation can reallocate call stack
 					int frame = ci - vm->_callsstack;
-					TracePoint( bp, vm, frame );
+					TracePoint( bp->logMessage, bp->hits, bp->hitsTarget, vm, frame );
 				}
 			}
 
@@ -20362,7 +20904,9 @@ void SQDebugServer::DebugHook( HSQUIRRELVM vm, int type,
 	}
 
 	// NOTE: CMP metamethod function call can reallocate call stack
-	if ( !( type != SQ_HOOK_RETURN && m_DataWatches.Size() && CheckDataBreakpoints( vm ) ) )
+	if ( !( type != SQ_HOOK_RETURN &&
+				m_DataWatches.Size() &&
+				CheckDataBreakpoints( vm, ci - vm->_callsstack ) ) )
 	{
 		if ( breakReason.reason )
 			Break( vm, breakReason );
@@ -20752,15 +21296,16 @@ SQInteger SQDebugServer::SQAddDataBreakpoint( HSQUIRRELVM vm )
 	SQDebugServer *dbg = sqdbg_get( vm );
 	if ( dbg && dbg->IsClientConnected() )
 	{
-		HSQOBJECT expression, condition, hits;
+		HSQOBJECT expression, condition, hits, message;
 		sq_resetobject( &condition );
 		sq_resetobject( &hits );
+		sq_resetobject( &message );
 		sq_getstackobj( vm, 2, &expression );
 		Assert( sq_type(expression) == OT_STRING );
 
 		SQInteger top = sq_gettop( vm );
 
-		if ( top > 4 )
+		if ( top > 5 )
 			return sq_throwerror( vm, _SC("wrong number of parameters") );
 
 		if ( top > 2 )
@@ -20775,6 +21320,12 @@ SQInteger SQDebugServer::SQAddDataBreakpoint( HSQUIRRELVM vm )
 
 				if ( _integer(hits) < 0 )
 					_integer(hits) = 0;
+
+				if ( top > 4 )
+				{
+					sq_getstackobj( vm, 5, &message );
+					Assert( sq_type(message) == OT_STRING );
+				}
 			}
 			else
 			{
@@ -20785,21 +21336,34 @@ SQInteger SQDebugServer::SQAddDataBreakpoint( HSQUIRRELVM vm )
 
 		unsigned int size = 2 + scstombslen( _string(expression)->_val, _string(expression)->_len );
 
-		if ( sq_type(condition) == OT_STRING )
+		if ( sq_type(condition) == OT_STRING && _string(condition)->_len )
 			size += scstombslen( _string(condition)->_val, _string(condition)->_len );
+
+		if ( sq_type(message) == OT_STRING && _string(message)->_len )
+			size += scstombslen( _string(message)->_val, _string(message)->_len );
 
 		CScratch_Restore_Auto _sr( &dbg->m_Scratch );
 		stringbufext_t bufId = dbg->ScratchPadBuf( size );
 		bufId.Put('0');
 		bufId.Puts( _string(expression) );
 
+		char *bufp = bufId.ptr + bufId.len;
 		string_t cond( 0, 0 );
+		string_t logMessage( 0, 0 );
 
-		if ( sq_type(condition) == OT_STRING )
+		if ( sq_type(condition) == OT_STRING && _string(condition)->_len )
 		{
-			cond.ptr = bufId.ptr + bufId.len;
-			cond.len = scstombs( cond.ptr, size - bufId.len,
+			cond.ptr = bufp;
+			cond.len = scstombs( cond.ptr, size - ( bufp - bufId.ptr ),
 					_string(condition)->_val, _string(condition)->_len );
+			bufp += cond.len;
+		}
+
+		if ( sq_type(message) == OT_STRING && _string(message)->_len )
+		{
+			logMessage.ptr = bufp;
+			logMessage.len = scstombs( logMessage.ptr, size - ( bufp - bufId.ptr ),
+					_string(message)->_val, _string(message)->_len );
 		}
 
 		Assert( vm->ci >= vm->_callsstack &&
@@ -20811,7 +21375,7 @@ SQInteger SQDebugServer::SQAddDataBreakpoint( HSQUIRRELVM vm )
 			sq_type((vm->ci-1)->_closure) == OT_CLOSURE &&
 			IsEqual( _SC("sqdbg"), _string(_fp(_closure((vm->ci-1)->_closure)->_function)->_sourcename) );
 
-		int id = dbg->AddDataBreakpoint( vm, vm->ci - 1 - repl, bufId, cond, _integer(hits) );
+		int id = dbg->AddDataBreakpoint( vm, vm->ci - 1 - repl, bufId, cond, _integer(hits), logMessage );
 
 		if ( ISVALID_ID(id) )
 		{
@@ -20854,50 +21418,44 @@ SQInteger SQDebugServer::SQEval( HSQUIRRELVM vm )
 		// return string if expression has format specifiers
 		int flags = ParseFormatSpecifiers( tmp );
 
-		CCompiler c( tmp );
-		ECompileReturnCode cres = c.Evaluate( dbg, vm, vm->ci - 1 - repl - vm->_callsstack, value );
+		CCompiler c( dbg, tmp );
+		ECompileReturnCode cres = c.Evaluate( vm, vm->ci - 1 - repl - vm->_callsstack, value );
+
+		if ( cres == CompileReturnCode_Success )
+		{
+			dbg->m_Scratch.Restore( _sr );
+
+			if ( flags )
+			{
+				tmp = dbg->GetValue( value, flags );
+#ifdef SQUNICODE
+				unsigned int len = SQUnicodeLength( tmp.ptr, tmp.len );
+				SQChar *pc = (SQChar*)dbg->ScratchPad( sq_rsl(len) );
+
+				if ( pc )
+				{
+					len = UTF8ToSQUnicode( pc, sq_rsl(len), tmp.ptr, tmp.len );
+					value = SQString::Create( _ss(vm), pc, len );
+				}
+				else
+				{
+					value = CreateSQString( _ss(vm), _SC(STR_NOMEM) );
+				}
+#else
+				value = CreateSQString( _ss(vm), tmp );
+#endif
+				dbg->m_Scratch.Restore( _sr );
+			}
+
+			sq_pushobject( vm, value );
+			return 1;
+		}
+
+		if ( cres != CompileReturnCode_CallError )
+			vm->_lasterror = CreateSQString( dbg, c.LastError() );
 
 		dbg->m_Scratch.Restore( _sr );
-
-		switch ( cres )
-		{
-			case CompileReturnCode_Success:
-				if ( flags )
-				{
-					_sr = dbg->m_Scratch.Save();
-					tmp = dbg->GetValue( value, flags );
-#ifdef SQUNICODE
-					unsigned int len = SQUnicodeLength( tmp.ptr, tmp.len );
-					SQChar *pc = (SQChar*)dbg->ScratchPad( sq_rsl(len) );
-
-					if ( pc )
-					{
-						len = UTF8ToSQUnicode( pc, sq_rsl(len), tmp.ptr, tmp.len );
-						value = SQString::Create( _ss(vm), pc, len );
-					}
-					else
-					{
-						value = CreateSQString( _ss(vm), _SC(STR_NOMEM) );
-					}
-#else
-					value = CreateSQString( _ss(vm), tmp );
-#endif
-					dbg->m_Scratch.Restore( _sr );
-				}
-
-				sq_pushobject( vm, value );
-				return 1;
-			case CompileReturnCode_DoesNotExist:
-				vm->_lasterror = CreateSQString( vm, _SC("index does not exist") );
-				return SQ_ERROR;
-			case CompileReturnCode_SyntaxError:
-				vm->_lasterror = CreateSQString( vm, c.LastError() );
-			case CompileReturnCode_CallError:
-				return SQ_ERROR;
-			default:
-				vm->_lasterror = CreateSQString( vm, _SC("unsupported") );
-				return SQ_ERROR;
-		}
+		return SQ_ERROR;
 	}
 
 	return 0;
@@ -21172,7 +21730,7 @@ HSQDEBUGSERVER sqdbg_get( HSQUIRRELVM vm )
 	HSQOBJECT ref;
 	sq_getstackobj( vm, -1, &ref );
 	Assert( sq_type(ref) == OT_USERDATA );
-	sq_poptop( vm );
+	sq_pop( vm, 1 );
 	return ((CDebuggerScriptRef*)_userdataval(ref))->dbg;
 }
 
@@ -21225,7 +21783,7 @@ HSQDEBUGSERVER sqdbg_attach_debugger( HSQUIRRELVM vm )
 	STACKCHECK( vm );
 
 	sq_pushregistrytable( vm );
-	sq_pushstring( vm, _SC(SQDBG_SV_TAG), -1 );
+	sq_pushstring( vm, _SC(SQDBG_SV_TAG), STRLEN(SQDBG_SV_TAG) );
 
 	if ( SQ_SUCCEEDED( sq_get( vm, -2 ) ) )
 	{
@@ -21263,12 +21821,12 @@ HSQDEBUGSERVER sqdbg_attach_debugger( HSQUIRRELVM vm )
 	if ( !ref )
 	{
 		// Referenced by script functions and the registry
-		sq_pushstring( vm, _SC(SQDBG_SV_TAG), -1 );
+		sq_pushstring( vm, _SC(SQDBG_SV_TAG), STRLEN(SQDBG_SV_TAG) );
 		ref = (CDebuggerScriptRef*)sq_newuserdata( vm, sizeof(CDebuggerScriptRef) );
 		sq_newslot( vm, -3, SQFalse );
 
 		// Only referenced by the registry
-		sq_pushstring( vm, _SC(SQDBG_SV_TAG "*"), -1 );
+		sq_pushstring( vm, _SC(SQDBG_SV_TAG "*"), STRLEN(SQDBG_SV_TAG "*") );
 		//
 		// NOTE: ref can be freed while shutdown is in progress
 		// through the release of references to the root table
@@ -21309,7 +21867,7 @@ void sqdbg_destroy_debugger( HSQUIRRELVM vm )
 	STACKCHECK( vm );
 
 	sq_pushregistrytable( vm );
-	sq_pushstring( vm, _SC(SQDBG_SV_TAG), -1 );
+	sq_pushstring( vm, _SC(SQDBG_SV_TAG), STRLEN(SQDBG_SV_TAG) );
 
 	if ( SQ_SUCCEEDED( sq_get( vm, -2 ) ) )
 	{
@@ -21327,10 +21885,10 @@ void sqdbg_destroy_debugger( HSQUIRRELVM vm )
 			ref->dbg = NULL;
 		}
 
-		sq_poptop( vm );
+		sq_pop( vm, 1 );
 	}
 
-	sq_poptop( vm );
+	sq_pop( vm, 1 );
 }
 
 int sqdbg_listen_socket( HSQDEBUGSERVER dbg, unsigned short port )

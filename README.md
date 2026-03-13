@@ -124,11 +124,13 @@ Specifier  | Format                                  | Example value            
 `x`        | hexadecimal                             | 221                       | 0xdd
 `X`        | hexadecimal (uppercase)                 | 221                       | 0xDD
 `xb`       | hexadecimal (no prefix)                 | 221                       | dd
-`x0`       | hexadecimal (padded)                    | 221                       | 0x000000dd
+`x2`       | hexadecimal (padded - 2 bytes)          | 221                       | 0x00dd
+`x0`       | hexadecimal (padded - full)             | 221                       | 0x000000dd
 `X0b`      | hexadecimal (uppercase, pad, no prefix) | 221                       | 000000DD
 `b`        | binary                                  | 221                       | 0b11011101
 `bb`       | binary (no prefix)                      | 221                       | 11011101
-`b0`       | binary (padded)                         | 221                       | 0b00000000000000000000000011011101
+`b2`       | binary (padded - 2 bytes)               | 221                       | 0b0000000011011101
+`b0`       | binary (padded - full)                  | 221                       | 0b00000000000000000000000011011101
 `b0b`      | binary (padded, no prefix)              | 221                       | 00000000000000000000000011011101
 `o`        | octal                                   | 221                       | 0335
 `d`        | decimal                                 | 0xdd                      | 221
@@ -139,6 +141,7 @@ Specifier  | Format                                  | Example value            
 `e`        | float (scientific)                      | 1250000.0                 | 1.250000e+06
 `g`        | float/scientific                        | 1250000.0                 | 1.25e+06
 `na`       | no address                              | 0x010C5F20 {x = 0, y = 1} | x = 0, y = 1
+`nq`       | no quote                                | "A\tB"                    | A    B
 `l`        | list members                            | 0x010C5F20 {size=4}       | 0x010C5F20 [26500, 29358, 15724, 26962]
 `lna`      | list members, no address                | 0x010C5F20 {size=4}       | [26500, 29358, 15724, 26962]
 `lnax`     | list members, no address, hexadecimal   | 0x010C5F20 {size=4}       | [0x6784, 0x72ae, 0x3d6c, 0x6952]
@@ -382,7 +385,7 @@ this, org, dir, normal, dist
 Script function         | Description
 ------------------------|--------------
 `sqdbg_break`           | Break execution on the next instruction
-`sqdbg_watch`           | Add data breakpoint on expression with optional condition and hit count
+`sqdbg_watch`           | Add data breakpoint on expression with optional condition, hit count and log message
 
 ### Profiler
 
@@ -480,6 +483,14 @@ Example block profile output:
 (sqdbg) prof | CSGOHudWeaponSelection::Paint                   : total 285.39 ms, avg 109.55 us, peak  66.59 ms(1), hits 2606
 (sqdbg) prof | CSGOHudWeaponSelection::GetWeapon               : total  28.66 ms, avg   9.95 us, peak  43.10 us(1944), hits 2880
 (sqdbg) prof | CSGOHudWeaponSelection::PerformLayoutInternal   : total  49.74 ms, avg 417.96 us, peak  15.69 ms(1), hits 120
+```
+
+### Data breakpoint log
+
+DAP `DataBreakpoint` object supports `logMessage` field. It is also usable with `sqdbg_watch`.
+
+```
+sqdbg_watch( "this.var", "", 0, "var changed in $FUNCTION: $OLDVALUE -> $NEWVALUE" );
 ```
 
 ## Notes

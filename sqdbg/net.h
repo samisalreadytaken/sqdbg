@@ -54,7 +54,7 @@
 
 	#undef errno
 	#define errno WSAGetLastError()
-	#define strerr(e) gai_strerror(e)
+	#define strerr(e) gai_strerrorA(e)
 #else
 	#include <sys/types.h>
 	#include <sys/socket.h>

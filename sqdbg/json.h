@@ -427,7 +427,7 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 						{
 							mem[idx++] = 'u';
 							uint16_t val = (uint16_t)*(unsigned char*)c;
-							idx += printhex< true, false >(
+							idx += printhex< false >(
 									mem + idx,
 									buffer->Capacity() - idx,
 									val );
@@ -442,7 +442,7 @@ static inline void PutStr( CBuffer *buffer, const string_t &str, bool quote )
 							mem[idx++] = 'x';
 							unsigned char val = *(unsigned char*)c;
 #endif
-							idx += printhex< true, false >(
+							idx += printhex< false >(
 									mem + idx,
 									buffer->Capacity() - idx,
 									val );
@@ -512,12 +512,12 @@ static inline void PutInt( CBuffer *buffer, I val )
 	buffer->size += len;
 }
 
-template < bool padding, typename I >
-static inline void PutHex( CBuffer *buffer, I val )
+template < typename I >
+static inline void PutHex( CBuffer *buffer, I val, bool padding )
 {
 	STATIC_ASSERT( IS_UNSIGNED( I ) );
 	buffer->base.Ensure( buffer->Size() + countdigits<16>( val ) + 1 );
-	int len = printhex< padding >( buffer->Base() + buffer->Size(), buffer->Capacity() - buffer->Size(), val );
+	int len = printhex( buffer->Base() + buffer->Size(), buffer->Capacity() - buffer->Size(), val, -(int)padding );
 	buffer->size += len;
 }
 
@@ -579,14 +579,7 @@ struct jstringbuf_t
 	template < typename I >
 	void PutHex( I val, bool padding = true )
 	{
-		if ( padding )
-		{
-			::PutHex< true >( m_pBuffer, val );
-		}
-		else
-		{
-			::PutHex< false >( m_pBuffer, val );
-		}
+		::PutHex( m_pBuffer, val, padding );
 	}
 };
 
@@ -712,7 +705,7 @@ public:
 		}
 		else
 		{
-			PutHex< false >( m_pBuffer, cast_unsigned( val ) );
+			PutHex( m_pBuffer, cast_unsigned( val ), false );
 		}
 		PutChar( m_pBuffer, ']' );
 		PutChar( m_pBuffer, '\"' );
@@ -863,7 +856,7 @@ private:
 		else
 		{
 			buf = m_Allocator->Alloc(5);
-			int i = printhex< true, true, false >( buf, 5, (unsigned char)token );
+			int i = printhex< true, false >( buf, 5, (unsigned char)token );
 			Assert( i == 4 );
 			buf[i] = 0;
 		}
@@ -1049,10 +1042,12 @@ private:
 				}
 
 #define _shift( bytesWritten, bytesRead ) \
+do { \
 	Assert( (bytesWritten) < (bytesRead) ); \
 	memmove( cur + (bytesWritten), cur + (bytesRead), end - ( cur + (bytesRead) ) ); \
 	cur += (bytesWritten); \
-	end -= (bytesRead) - (bytesWritten);
+	end -= (bytesRead) - (bytesWritten); \
+} while (0)
 
 				switch ( cur[1] )
 				{
