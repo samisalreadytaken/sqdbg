@@ -17,11 +17,6 @@
 	#ifdef _DEBUG
 		#include <debugapi.h>
 
-		inline bool __IsDebuggerPresent()
-		{
-			return IsDebuggerPresent();
-		}
-
 		inline const char *GetModuleBaseName()
 		{
 			static char module[MAX_PATH];

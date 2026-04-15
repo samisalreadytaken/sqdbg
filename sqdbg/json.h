@@ -59,7 +59,7 @@ class json_array_t
 public:
 	const char *m_pBase;
 	CScratch< true > *m_Allocator;
-	int *m_Elements;
+	scratchindex_t *m_Elements;
 	unsigned short m_nElementCount;
 	unsigned short m_nElementsSize;
 
@@ -77,16 +77,16 @@ public:
 		{
 			// doesn't free old ptr, this is an uncommon operation and extra allocation is fine
 			int oldsize = m_nElementsSize;
-			int *oldptr = m_Elements;
+			scratchindex_t *oldptr = m_Elements;
 
 			m_nElementsSize = !m_nElementsSize ? 8 : ( m_nElementsSize << 1 );
-			m_Elements = (int*)m_Allocator->Alloc( m_nElementsSize * sizeof(int) );
+			m_Elements = (scratchindex_t*)m_Allocator->Alloc( m_nElementsSize * sizeof(*m_Elements) );
 
 			if ( oldsize )
-				memcpy( m_Elements, oldptr, oldsize * sizeof(int) );
+				memcpy( m_Elements, oldptr, oldsize * sizeof(*m_Elements) );
 		}
 
-		int index;
+		scratchindex_t index;
 		json_value_t *ret = (json_value_t*)m_Allocator->Alloc( sizeof(json_value_t), &index );
 		m_Elements[ m_nElementCount++ ] = index;
 		return ret;
@@ -135,7 +135,7 @@ class json_table_t
 public:
 	const char *m_pBase;
 	CScratch< true > *m_Allocator;
-	int *m_Elements;
+	scratchindex_t *m_Elements;
 	unsigned short m_nElementCount;
 	unsigned short m_nElementsSize;
 
@@ -170,16 +170,16 @@ public:
 		if ( m_nElementCount == m_nElementsSize )
 		{
 			int oldsize = m_nElementsSize;
-			int *oldptr = m_Elements;
+			scratchindex_t *oldptr = m_Elements;
 
 			m_nElementsSize = !m_nElementsSize ? 8 : ( m_nElementsSize << 1 );
-			m_Elements = (int*)m_Allocator->Alloc( m_nElementsSize * sizeof(int) );
+			m_Elements = (scratchindex_t*)m_Allocator->Alloc( m_nElementsSize * sizeof(*m_Elements) );
 
 			if ( oldsize )
-				memcpy( m_Elements, oldptr, oldsize * sizeof(int) );
+				memcpy( m_Elements, oldptr, oldsize * sizeof(*m_Elements) );
 		}
 
-		int index;
+		scratchindex_t index;
 		json_field_t *ret = (json_field_t*)m_Allocator->Alloc( sizeof(json_field_t), &index );
 		m_Elements[ m_nElementCount++ ] = index;
 		return ret;
@@ -516,7 +516,7 @@ template < typename I >
 static inline void PutHex( CBuffer *buffer, I val, bool padding )
 {
 	STATIC_ASSERT( IS_UNSIGNED( I ) );
-	buffer->base.Ensure( buffer->Size() + countdigits<16>( val ) + 1 );
+	buffer->base.Ensure( buffer->Size() + ( padding ? sizeof(I) * 2 : countdigits<16>( val ) ) + 2 );
 	int len = printhex( buffer->Base() + buffer->Size(), buffer->Capacity() - buffer->Size(), val, -(int)padding );
 	buffer->size += len;
 }

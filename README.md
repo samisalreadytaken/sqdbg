@@ -134,14 +134,16 @@ Specifier  | Format                                  | Example value            
 `b0b`      | binary (padded, no prefix)              | 221                       | 00000000000000000000000011011101
 `o`        | octal                                   | 221                       | 0335
 `d`        | decimal                                 | 0xdd                      | 221
-`dx`       | interpret float as integer (hexadecimal)| 1.0                       | 0x3f800000
 `c`        | character                               | 'A'                       | 65 'A'
 `cx`       | character (hexadecimal)                 | 'A'                       | 0x41 'A'
-`f`        | float                                   | FLT\_MAX                  | 340282346638528859811704183484516925440.000000
+`d`        | float (decimal)                         | 1.0                       | 1065353216
+`x`        | float (hexadecimal)                     | 1.0                       | 0x3f800000
+`f`        | float (full precision)                  | PI / 20                   | 0.157079637
 `e`        | float (scientific)                      | 1250000.0                 | 1.250000e+06
 `g`        | float/scientific                        | 1250000.0                 | 1.25e+06
+`fe`       | float (scientific)                      | 1042340220                | 1.570796e-01
 `na`       | no address                              | 0x010C5F20 {x = 0, y = 1} | x = 0, y = 1
-`nq`       | no quote                                | "A\tB"                    | A    B
+`sb`       | string (no quote)                       | "A\"B\""                  | A"B"
 `l`        | list members                            | 0x010C5F20 {size=4}       | 0x010C5F20 [26500, 29358, 15724, 26962]
 `lna`      | list members, no address                | 0x010C5F20 {size=4}       | [26500, 29358, 15724, 26962]
 `lnax`     | list members, no address, hexadecimal   | 0x010C5F20 {size=4}       | [0x6784, 0x72ae, 0x3d6c, 0x6952]
@@ -365,26 +367,26 @@ parameters    5
 ------
 this, org, dir, normal, dist
 ------
-0      0x08 5 0 2 6                 PREPCALLK [5] = [dir]->"Dot"
-1      0x0A 7 3 0 0                 MOVE [7] = [normal]
-2      0x06 5 5 6 2                 CALL [d] = [5] 2
-3      0x1E 5 6 0 0                 JZ [d] 6
-4      0x08 6 0 1 7                 PREPCALLK [6] = [org]->"Dot"
-5      0x0A 8 3 0 0                 MOVE [8] = [normal]
-6      0x06 6 6 7 2                 CALL [6] = [6] 2
-7      0x12 6 6 4 0                 SUB [6] = [dist] - [6]
-8      0x14 6 5 6 0                 DIV [6] /= [d]
-9      0x17 1 6 7 0                 RETURN [6]
-10     0x03 6 0 0 0                 LOADFLOAT [6] = 0
-11     0x17 1 6 7 0                 RETURN [6]
-12     0x17 255 0 0 0               RETURN
+0000   0x08 5 0 2 6                 PREPCALLK [5] = [dir]->"Dot"
+0001   0x0A 7 3 0 0                 MOVE [7] = [normal]
+0002   0x06 5 5 6 2                 CALL [d] = [5] 2
+0003   0x1E 5 6 0 0                 JZ [d] 6
+0004   0x08 6 0 1 7                 PREPCALLK [6] = [org]->"Dot"
+0005   0x0A 8 3 0 0                 MOVE [8] = [normal]
+0006   0x06 6 6 7 2                 CALL [6] = [6] 2
+0007   0x12 6 6 4 0                 SUB [6] = [dist] - [6]
+0008   0x14 6 5 6 0                 DIV [6] /= [d]
+0009   0x17 1 6 7 0                 RETURN [6]
+000A   0x03 6 0 0 0                 LOADFLOAT [6] = 0
+000B   0x17 1 6 7 0                 RETURN [6]
+000C   0x17 255 0 0 0               RETURN
 ```
 
 ### Programmatic breakpoints
 
 Script function         | Description
 ------------------------|--------------
-`sqdbg_break`           | Break execution on the next instruction
+`sqdbg_break`           | Break execution on the next instruction. Use a dummy instruction to break on current line: `sqdbg_break();1;`
 `sqdbg_watch`           | Add data breakpoint on expression with optional condition, hit count and log message
 
 ### Profiler

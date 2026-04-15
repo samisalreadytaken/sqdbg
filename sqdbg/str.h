@@ -21,16 +21,16 @@
 		#define FMT_INT "%ld"
 	#endif
 	#ifdef _WIN32
-		#define FMT_PTR "0x%016llX"
+		#define FMT_PTR "%016llX"
 	#else
-		#define FMT_PTR "0x%016lX"
+		#define FMT_PTR "%016lX"
 	#endif
 #else
 	#define FMT_INT_LEN 11 // -2147483648
 	#define FMT_OCT_LEN 12 // 017777777777
 
 	#define FMT_INT "%d"
-	#define FMT_PTR "0x%08X"
+	#define FMT_PTR "%08X"
 #endif
 
 #ifdef SQUNICODE
@@ -47,12 +47,14 @@
 
 #ifdef SQUSEDOUBLE
 	#define FMT_FLT "%lf"
-	#define FMT_FLT_LEN ( 1 + DBL_MAX_10_EXP + 1 + 1 + DBL_DIG )
-	#define FMT_FLT_DIG_STR __MKSTR( DBL_DIG )
+	#define FMT_FLT_DIG 17
+	#define FMT_FLT_DIG_STR "17"
+	#define FMT_FLT_LEN ( 1 + DBL_MAX_10_EXP + 1 + 1 + FMT_FLT_DIG )
 #else
 	#define FMT_FLT "%f"
-	#define FMT_FLT_LEN ( 1 + FLT_MAX_10_EXP + 1 + 1 + FLT_DIG )
-	#define FMT_FLT_DIG_STR __MKSTR( FLT_DIG )
+	#define FMT_FLT_DIG 9
+	#define FMT_FLT_DIG_STR "9"
+	#define FMT_FLT_LEN ( 1 + FLT_MAX_10_EXP + 1 + 1 + FMT_FLT_DIG )
 #endif
 
 struct string_t;
@@ -1225,9 +1227,9 @@ single:
 
 		continue;
 
+supplementary:
 		if ( sizeof(SQChar) == 2 )
 		{
-supplementary:
 			if ( dst )
 			{
 				if ( sizeof(SQChar) * 2 <= destSize )
