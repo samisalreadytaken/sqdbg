@@ -813,6 +813,8 @@ public:
 		m_Allocator( allocator ),
 		m_error( NULL )
 	{
+		Assert( (intptr_t)( m_end - m_start ) < (intptr_t)(ostr_t::index_t)-1 );
+
 		string_t token;
 		char type = NextToken( token );
 
@@ -1225,7 +1227,6 @@ err_eof:
 
 			json_field_t *kv = pTable->NewElement();
 
-			Assert( (ostr_t::index_t)( token.ptr - m_start ) < (ostr_t::index_t)-1 );
 			kv->key.ofs = token.ptr - m_start;
 			kv->key.len = (ostr_t::index_t)token.len;
 
@@ -1318,7 +1319,6 @@ err_eof:
 				return type;
 			case Token_String:
 				value->type = JSON_STRING;
-				Assert( (ostr_t::index_t)( token.ptr - m_start ) < (ostr_t::index_t)-1 );
 				value->_string.ofs = token.ptr - m_start;
 				value->_string.len = (ostr_t::index_t)token.len;
 				return type;

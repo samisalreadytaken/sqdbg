@@ -5,7 +5,7 @@
 // Squirrel Debugger
 //
 
-#define SQDBG_SV_VER 11
+#define SQDBG_SV_VER 12
 
 #include <sqdbg.h>
 
@@ -103,7 +103,7 @@ void sqdbg_sleep( int ms )
 #endif
 
 #if defined(_MSC_VER)
-	#if !defined(RTTI_ENABLED)
+	#if !defined(_CPPRTTI)
 		#define SQDBG_NO_RTTI
 	#endif
 #elif defined(__GNUC__)
@@ -315,7 +315,7 @@ STATIC_ASSERT( sizeof(SQFloat) == sizeof(SQFloat_Int) );
 	#endif
 #endif
 
-#if SQUIRREL_VERSION_NUMBER < 310
+#if SQUIRREL_VERSION_NUMBER <= 310
 	#undef type
 	#undef is_delegable
 	#define is_delegable(t) (sq_type(t) & SQOBJECT_DELEGABLE)
@@ -2892,6 +2892,7 @@ public:
 			Err_InvalidToken = -50,
 			Err_Unsupported,
 			Err_Expected,
+			Err_ExpectedExpr,
 			Err_SetFailed,
 			Err_OpFailed,
 			Err_BufLim,
@@ -3275,7 +3276,7 @@ private:
 	void DescribeInstruction( const SQInstruction *instr, const SQFunctionProto *func, stringbufext_t &buf );
 	inline int DisassemblyBufLen( SQClosure *target );
 	sqstring_t PrintDisassembly( SQClosure *target, SQChar *scratch, int bufsize );
-	void PutParameterValue( const SQObjectPtr &val, jstringbuf_t &buf );
+	void PutParameterValue( const SQObjectPtr &val, int flags, jstringbuf_t &buf );
 
 #ifndef SQDBG_DISABLE_PROFILER
 public:
@@ -3295,9 +3296,20 @@ public:
 #endif
 
 public:
+	struct stackframeformat_t
+	{
+		bool hex : 1;
+		bool parameters : 1;
+		bool parameterTypes : 1;
+		bool parameterNames : 1;
+		bool parameterValues : 1;
+#ifdef SQDBG_NATIVE_STACKTRACE
+		bool module : 1;
+#endif
+	};
+
 	int StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int levels,
-			bool parameters, bool parameterTypes, bool parameterNames, bool parameterValues,
-			wjson_array_t &stackFrames );
+			stackframeformat_t format, wjson_array_t &stackFrames );
 	void DumpBreakpoints( wjson_array_t &variables );
 	void DumpStack( HSQUIRRELVM vm, int frame, int flags, wjson_array_t &variables );
 	void DumpUserDefinedMembers( const SQObject &target,
@@ -3355,15 +3367,13 @@ public:
 	struct frameinfo_t
 	{
 		void *ip;
-#ifdef SQDBG_NATIVE_STACKTRACE_NO_PC_ONLY
-		void *bp;
-#endif
 	};
 
 	frameinfo_t *CollectNativeStack();
 	void GetNativeSym( SYMBOL_INFO **pInfo, void *pFuncAddr, string_t *funcname );
 	void *GetNativeStackIP( SYMBOL_INFO *pInfo, unsigned int *offset, frameinfo_t **pFrames, int *nCount );
-	void GetNativeSource( void *pPC, string_t *filepath, int *line );
+	void GetNativeSource( void *pPC, string_t *filepath, int *line, string_t *modulename );
+	void GetModuleName( void *pPC, string_t *modulename );
 	void SkipScriptFrame( frameinfo_t **pFrames, int *nCount, bool bSkipCurrentNativeFrame = true );
 	void SkipStackFrame( int i, const SQVM::CallInfo *ci, frameinfo_t **pFrames, int *nCount );
 	HANDLE m_hProcess;
@@ -9423,6 +9433,12 @@ binary:
 					{
 						ECompileReturnCode res = Evaluate( vm, frame, val, ':' );
 
+						if ( res == CompileReturnCode_NoValue )
+						{
+							SetError( Err_ExpectedExpr );
+							return CompileReturnCode_SyntaxError;
+						}
+
 						if ( res != CompileReturnCode_Success )
 							return res;
 
@@ -9434,6 +9450,12 @@ binary:
 
 						res = LexAll( closer );
 
+						if ( res == CompileReturnCode_NoValue )
+						{
+							SetError( Err_ExpectedExpr );
+							return CompileReturnCode_SyntaxError;
+						}
+
 						if ( res != CompileReturnCode_Success )
 							return res;
 
@@ -9444,10 +9466,22 @@ binary:
 					{
 						ECompileReturnCode res = LexAll( ':' );
 
+						if ( res == CompileReturnCode_NoValue )
+						{
+							SetError( Err_ExpectedExpr );
+							return CompileReturnCode_SyntaxError;
+						}
+
 						if ( res != CompileReturnCode_Success )
 							return res;
 
 						res = Evaluate( vm, frame, val, closer );
+
+						if ( res == CompileReturnCode_NoValue )
+						{
+							SetError( Err_ExpectedExpr );
+							return CompileReturnCode_SyntaxError;
+						}
 
 						if ( res != CompileReturnCode_Success )
 							return res;
@@ -10255,8 +10289,12 @@ binary:
 
 						if ( ExpectsValue( prevtoken ) )
 						{
-							if ( closer < 0x20 )
+							if ( closer < 0x20 && token.type != Token_End && token.type != ';' )
+							{
 								SetError( Err_Unsupported );
+								return CompileReturnCode_Unsupported;
+							}
+
 							return CompileReturnCode_NoValue;
 						}
 
@@ -10417,6 +10455,9 @@ binary:
 				buf.Puts( "expected '" );
 				buf.Put( (char)(uintptr_t)data );
 				buf.Put( '\'' );
+				break;
+			case Err_ExpectedExpr:
+				buf.Puts( "expected expression" );
 				break;
 			case Err_SetFailed:
 				buf.Puts( "assignment failed" );
@@ -10988,8 +11029,12 @@ binary:
 
 						if ( ExpectsValue( prevtoken ) )
 						{
-							if ( closer < 0x20 )
+							if ( closer < 0x20 && token.type != Token_End && token.type != ';' )
+							{
 								SetError( Err_Unsupported );
+								return CompileReturnCode_Unsupported;
+							}
+
 							return CompileReturnCode_NoValue;
 						}
 
@@ -15122,25 +15167,38 @@ bool SQDebugServer::TranslateFrameID( int frameId, HSQUIRRELVM *thread, int *sta
 	return false;
 }
 
+#define JSONGetBool( table, key, dest ) \
+{ \
+	bool _f; \
+	(table).GetBool( key, &(_f) ); \
+	dest = _f; \
+} (void)0
+
 void SQDebugServer::OnRequest_StackTrace( const json_table_t &arguments, int seq )
 {
 	int threadId, startFrame, levels;
-	json_table_t *format;
-	bool parameters = true,
-		 parameterTypes = false,
-		 parameterNames = true,
-		 parameterValues = false;
+	json_table_t *pFormat;
+	stackframeformat_t format = {};
+	format.parameters = true;
+	format.parameterNames = true;
+#ifdef SQDBG_NATIVE_STACKTRACE
+	format.module = true;
+#endif
 
 	arguments.GetInt( "threadId", &threadId, -1 );
 	arguments.GetInt( "startFrame", &startFrame );
 	arguments.GetInt( "levels", &levels );
 
-	if ( arguments.GetTable( "format", &format ) )
+	if ( arguments.GetTable( "format", &pFormat ) )
 	{
-		format->GetBool( "parameters", &parameters );
-		format->GetBool( "parameterTypes", &parameterTypes );
-		format->GetBool( "parameterNames", &parameterNames );
-		format->GetBool( "parameterValues", &parameterValues );
+		JSONGetBool( *pFormat, "hex", format.hex );
+		JSONGetBool( *pFormat, "parameters", format.parameters );
+		JSONGetBool( *pFormat, "parameterTypes", format.parameterTypes );
+		JSONGetBool( *pFormat, "parameterNames", format.parameterNames );
+		JSONGetBool( *pFormat, "parameterValues", format.parameterValues );
+#ifdef SQDBG_NATIVE_STACKTRACE
+		JSONGetBool( *pFormat, "module", format.module );
+#endif
 	}
 
 	HSQUIRRELVM vm = ThreadFromID( threadId );
@@ -15168,46 +15226,45 @@ void SQDebugServer::OnRequest_StackTrace( const json_table_t &arguments, int seq
 	int totalFrames;
 	{
 		wjson_array_t stackFrames = body.SetArray( "stackFrames" );
-		totalFrames = StackTrace( vm, threadId, startFrame, levels,
-				parameters, parameterTypes, parameterNames, parameterValues,
-				stackFrames );
+		totalFrames = StackTrace( vm, threadId, startFrame, levels, format, stackFrames );
 	}
 	body.SetInt( "totalFrames", totalFrames );
 	DAP_SEND();
 }
 
-void SQDebugServer::PutParameterValue( const SQObjectPtr &val, jstringbuf_t &buf )
+void SQDebugServer::PutParameterValue( const SQObjectPtr &val, int flags, jstringbuf_t &buf )
 {
 	switch ( sq_type(val) )
 	{
 		case OT_INTEGER:
-		case OT_FLOAT:
 		case OT_BOOL:
 		case OT_NULL:
-		case OT_STRING:
 		case OT_TABLE:
 		case OT_ARRAY:
 		case OT_CLASS:
-		case OT_INSTANCE:
 		case OT_CLOSURE:
 		case OT_NATIVECLOSURE:
-		{
-			CScratch_Restore_Auto _sr( &m_Scratch );
-			string_t str = GetValue( val,
-					( kFS_Truncate | ( 32 << kFS_SHIFTAMT ) ) |
-					kFS_FloatG );
-			buf.Puts( str );
 			break;
-		}
+		case OT_FLOAT:
+			flags = ( flags & ~( kFS_Hexadecimal | kFS_Binary ) ) | kFS_FloatG;
+			break;
+		case OT_STRING:
+		case OT_INSTANCE:
+			flags |= kFS_Truncate | ( 32 << kFS_SHIFTAMT );
+			break;
 		default:
 			Assert( ISREFCOUNTED( sq_type(val) ) );
 			buf.PutHex( (uintptr_t)_refcounted(val) );
+			return;
 	}
+
+	CScratch_Restore_Auto _sr( &m_Scratch );
+	string_t str = GetValue( val, flags );
+	buf.Puts( str );
 }
 
 int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int levels,
-		bool parameters, bool parameterTypes, bool parameterNames, bool parameterValues,
-		wjson_array_t &stackFrames )
+		stackframeformat_t format, wjson_array_t &stackFrames )
 {
 	Assert( startFrame >= 0 && levels >= 0 );
 
@@ -15226,6 +15283,8 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 		nCount = 0;
 	}
 #endif
+
+	int flags = format.hex ? kFS_Hexadecimal : 0;
 
 #ifdef NATIVE_DEBUG_HOOK
 	int lastFrame = vm->_callsstacksize - 1;
@@ -15304,7 +15363,7 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 					buf.PutHex( (uintptr_t)func );
 				}
 
-				if ( parameters )
+				if ( format.parameters )
 				{
 					buf.Put('(');
 
@@ -15326,15 +15385,15 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 
 						for ( int j = 1; j < nparams; j++ )
 						{
-							if ( parameterTypes )
+							if ( format.parameterTypes )
 							{
 								const SQObjectPtr &val = vm->_stack._vals[ stackbase + j ];
 								buf.Puts( GetType( val ) );
 							}
 
-							if ( parameterNames )
+							if ( format.parameterNames )
 							{
-								if ( parameterTypes )
+								if ( format.parameterTypes )
 									buf.Put(' ');
 
 								const SQObjectPtr &param = func->_parameters[j];
@@ -15342,13 +15401,13 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 								buf.Puts( _string(param) );
 							}
 
-							if ( parameterValues )
+							if ( format.parameterValues )
 							{
-								if ( parameterNames || parameterTypes )
+								if ( format.parameterNames || format.parameterTypes )
 									buf.Puts(" = ");
 
 								const SQObjectPtr &val = vm->_stack._vals[ stackbase + j ];
-								PutParameterValue( val, buf );
+								PutParameterValue( val, flags, buf );
 							}
 
 							buf.Put(',');
@@ -15359,7 +15418,7 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 						{
 							buf.Seek( -2 );
 						}
-						else if ( parameterValues || parameterTypes )
+						else if ( format.parameterValues || format.parameterTypes )
 						{
 							buf.Put('[');
 #if SQUIRREL_VERSION_NUMBER >= 300
@@ -15386,15 +15445,15 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 									const SQObjectPtr &val = vm->_vargsstack[ ci->_vargs.base + j ];
 #endif
 
-									if ( parameterTypes )
+									if ( format.parameterTypes )
 										buf.Puts( GetType( val ) );
 
-									if ( parameterValues )
+									if ( format.parameterValues )
 									{
-										if ( parameterTypes )
+										if ( format.parameterTypes )
 											buf.Puts(" = ");
 
-										PutParameterValue( val, buf );
+										PutParameterValue( val, flags, buf );
 									}
 
 									buf.Put(',');
@@ -15438,11 +15497,11 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 			int line = 0;
 #ifdef SQDBG_NATIVE_STACKTRACE
 			unsigned int offset = 0;
-			string_t funcname( 0, 0 ), filepath( 0, 0 );
+			string_t funcname( 0, 0 ), filepath( 0, 0 ), modulename( 0, 0 );
 			SYMBOL_INFO *pInfo;
 			GetNativeSym( &pInfo, (void*)closure->_function, &funcname );
 			void *ip = nCount ? GetNativeStackIP( pInfo, &offset, &pFrames, &nCount ) : NULL;
-			GetNativeSource( ip ? (char*)ip - 1 : (void*)closure->_function, &filepath, &line );
+			GetNativeSource( ip ? (char*)ip - 1 : (void*)closure->_function, &filepath, &line, &modulename );
 #endif
 
 			wjson_table_t frame = stackFrames.AppendTable();
@@ -15450,6 +15509,14 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 
 			{
 				jstringbuf_t buf = frame.SetStringAsBuf( "name" );
+
+#ifdef SQDBG_NATIVE_STACKTRACE
+				if ( format.module && modulename.ptr )
+				{
+					buf.Puts( modulename );
+					buf.Put('!');
+				}
+#endif
 
 #ifdef SQDBG_NATIVE_STACKTRACE
 				if ( funcname.ptr )
@@ -15467,7 +15534,7 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 					buf.PutHex( (uintptr_t)closure );
 				}
 
-				if ( parameters )
+				if ( format.parameters )
 				{
 					buf.Put('(');
 
@@ -15488,23 +15555,23 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 					{
 						for ( int j = 0; j < nparams; j++ )
 						{
-							if ( parameterTypes )
+							if ( format.parameterTypes )
 							{
 								const SQObjectPtr &val = vm->_stack._vals[ stackbase + j ];
 								buf.Puts( GetType( val ) );
 							}
-							else if ( parameterNames )
+							else if ( format.parameterNames )
 							{
 								buf.Put('.');
 							}
 
-							if ( parameterValues )
+							if ( format.parameterValues )
 							{
-								if ( parameterTypes )
+								if ( format.parameterTypes )
 									buf.Puts(" = ");
 
 								const SQObjectPtr &val = vm->_stack._vals[ stackbase + j ];
-								PutParameterValue( val, buf );
+								PutParameterValue( val, flags, buf );
 							}
 
 							buf.Put(',');
@@ -15601,6 +15668,7 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 				frame.SetInt( "line", 0 );
 				frame.SetInt( "column", 0 );
 				frame.SetString( "presentationHint", "label" );
+				frame.SetBool( "canRestart", false );
 			}
 		}
 
@@ -15618,11 +15686,11 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 
 			int line = 0;
 			unsigned int offset = 0;
-			string_t funcname( 0, 0 ), filepath( 0, 0 );
+			string_t funcname( 0, 0 ), filepath( 0, 0 ), modulename( 0, 0 );
 			void *ip = pFrames[0].ip;
 			SYMBOL_INFO *pInfo;
 			GetNativeSym( &pInfo, ip, &funcname );
-			GetNativeSource( (char*)ip - 1, &filepath, &line );
+			GetNativeSource( (char*)ip - 1, &filepath, &line, &modulename );
 			Verify( GetNativeStackIP( pInfo, &offset, &pFrames, &nCount ) );
 
 			wjson_table_t frame = stackFrames.AppendTable();
@@ -15630,6 +15698,12 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 
 			{
 				jstringbuf_t buf = frame.SetStringAsBuf( "name" );
+
+				if ( format.module && modulename.ptr )
+				{
+					buf.Puts( modulename );
+					buf.Put('!');
+				}
 
 				if ( funcname.ptr )
 				{
@@ -15640,7 +15714,7 @@ int SQDebugServer::StackTrace( HSQUIRRELVM vm, int threadId, int startFrame, int
 					buf.PutHex( (uintptr_t)ip );
 				}
 
-				if ( parameters )
+				if ( format.parameters )
 				{
 					buf.Puts( "()" );
 				}
@@ -16690,10 +16764,11 @@ void SQDebugServer::OnRequest_Variables( const json_table_t &arguments, int seq 
 #ifdef SQDBG_NATIVE_STACKTRACE
 						{
 							int line = 0;
-							string_t funcname( 0, 0 ), filepath( 0, 0 );
+							string_t funcname( 0, 0 ), filepath( 0, 0 ), modulename( 0, 0 );
 							SYMBOL_INFO *pInfo;
 							GetNativeSym( &pInfo, (void*)_nativeclosure(target)->_function, &funcname );
-							GetNativeSource( (void*)_nativeclosure(target)->_function, &filepath, &line );
+							GetNativeSource( (void*)_nativeclosure(target)->_function,
+									&filepath, &line, &modulename );
 							{
 								wjson_table_t elem = variables.AppendTable();
 								elem.SetString( "name", INTERNAL_TAG("function") );
@@ -20147,7 +20222,7 @@ SQDebugServer::frameinfo_t *SQDebugServer::CollectNativeStack()
 
 	Assert( !( (uintptr_t)pFrames % sizeof(void*) ) );
 
-#ifndef SQDBG_NATIVE_STACKTRACE_NO_PC_ONLY
+#if 1
 	STATIC_ASSERT( sizeof(frameinfo_t) == sizeof(void*) );
 	*pCount = (int)RtlCaptureStackBackTrace( 0, kMaxStackCount, (void**)pFrames, NULL ) - 1;
 	if ( *pCount < 0 )
@@ -20187,7 +20262,6 @@ SQDebugServer::frameinfo_t *SQDebugServer::CollectNativeStack()
 					NULL, SymFunctionTableAccess, SymGetModuleBase, NULL ) )
 		{
 			pFrames[i].ip = (void*)frame.AddrPC.Offset;
-			pFrames[i].bp = (void*)frame.AddrFrame.Offset;
 		}
 		else
 		{
@@ -20277,8 +20351,6 @@ void *SQDebugServer::GetNativeStackIP( SYMBOL_INFO *pInfo, unsigned int *offset,
 	(void)pModBase;
 
 	// NOTE: Size from function table entry can be inaccurate without unwinding
-	// Ignore it if there is BP
-#ifndef SQDBG_NATIVE_STACKTRACE_NO_PC_ONLY
 	if ( !dwProcSize )
 	{
 #ifdef _M_IX86
@@ -20301,18 +20373,13 @@ void *SQDebugServer::GetNativeStackIP( SYMBOL_INFO *pInfo, unsigned int *offset,
 #endif
 		}
 	}
-#endif
 
 	for ( int i = 0; i < *nCount; i++ )
 	{
 		const frameinfo_t &frame = (*pFrames)[i];
 
 		// Check equal to match 0 size if pFuncBase is an IP
-		if ( ( (DWORD)((uintptr_t)frame.ip - pFuncBase) <= dwProcSize )
-#ifdef SQDBG_NATIVE_STACKTRACE_NO_PC_ONLY
-				|| ( frame.bp && *(uintptr_t*)frame.bp == pFuncBase )
-#endif
-		)
+		if ( (DWORD)((uintptr_t)frame.ip - pFuncBase) <= dwProcSize )
 		{
 			*offset = (uintptr_t)frame.ip - pFuncBase;
 			*pFrames += i + 1;
@@ -20325,9 +20392,11 @@ void *SQDebugServer::GetNativeStackIP( SYMBOL_INFO *pInfo, unsigned int *offset,
 	return NULL;
 }
 
-void SQDebugServer::GetNativeSource( void *pPC, string_t *filepath, int *line )
+void SQDebugServer::GetNativeSource( void *pPC, string_t *filepath, int *line, string_t *modulename )
 {
 	Assert( m_hProcess );
+
+	GetModuleName( pPC, modulename );
 
 	DWORD dwDisplacement;
 	IMAGEHLP_LINE lineInfo = {};
@@ -20337,8 +20406,19 @@ void SQDebugServer::GetNativeSource( void *pPC, string_t *filepath, int *line )
 	{
 		*line = (int)lineInfo.LineNumber;
 		filepath->Assign( lineInfo.FileName, strlen( lineInfo.FileName ) );
-		return;
 	}
+	else
+	{
+		*filepath = *modulename;
+	}
+
+	if ( modulename->ptr )
+		StripFileName( &modulename->ptr, &modulename->len );
+}
+
+void SQDebugServer::GetModuleName( void *pPC, string_t *modulename )
+{
+	Assert( m_hProcess );
 
 	const int size = sizeof(IMAGEHLP_MODULE);
 	char *buf = ScratchPad( size );
@@ -20348,8 +20428,7 @@ void SQDebugServer::GetNativeSource( void *pPC, string_t *filepath, int *line )
 
 	if ( SymGetModuleInfo( m_hProcess, (uintptr_t)pPC, pModuleInfo ) )
 	{
-		*line = 0;
-		filepath->Assign( pModuleInfo->ImageName, strlen( pModuleInfo->ImageName ) );
+		modulename->Assign( pModuleInfo->ImageName, strlen( pModuleInfo->ImageName ) );
 		return;
 	}
 
@@ -20362,8 +20441,7 @@ void SQDebugServer::GetNativeSource( void *pPC, string_t *filepath, int *line )
 				&hModule ) &&
 			GetModuleFileNameExA( m_hProcess, hModule, buf, size ) )
 	{
-		*line = 0;
-		filepath->Assign( buf, strlen( buf ) );
+		modulename->Assign( buf, strlen( buf ) );
 		return;
 	}
 }
@@ -20374,10 +20452,10 @@ void SQDebugServer::SkipScriptFrame( frameinfo_t **pFrames, int *nCount, bool bS
 
 	for ( int i = 0; i < *nCount; i++ )
 	{
-		string_t filepath( 0, 0 );
+		string_t filepath( 0, 0 ), modulename( 0, 0 );
 		int line;
 
-		GetNativeSource( (char*)(*pFrames)[i].ip - 1, &filepath, &line );
+		GetNativeSource( (char*)(*pFrames)[i].ip - 1, &filepath, &line, &modulename );
 
 		if ( filepath.ptr )
 			StripFileName( &filepath.ptr, &filepath.len );
@@ -22613,6 +22691,8 @@ SQDBG_API void sqdbg_dump_stack( HSQUIRRELVM vm,
 	{
 		wjson_table_t body( dbg->m_SendBuf );
 		wjson_array_t variables = body.SetArray( "" );
+		// NOTE: Make sure to manage very large strings that do not fit json reader strings
+		// if this interface goes public
 		dbg->DumpStack( vm, -1, 0, variables );
 	}
 
@@ -22629,9 +22709,9 @@ SQDBG_API void sqdbg_dump_stack( HSQUIRRELVM vm,
 		Verify( a->GetTable( i, &elem ) );
 
 		string_t name, type, value;
-		Verify( elem->GetString( "name", &name ) );
-		Verify( elem->GetString( "type", &type ) );
-		Verify( elem->GetString( "value", &value ) );
+		elem->GetString( "name", &name );
+		elem->GetString( "type", &type );
+		elem->GetString( "value", &value );
 		(*callback)( ud, name.ptr, name.len, type.ptr, type.len, value.ptr, value.len );
 	}
 }
@@ -22658,9 +22738,17 @@ SQDBG_API void sqdbg_stacktrace( HSQUIRRELVM vm, int startFrame, int levels,
 	{
 		wjson_table_t body( dbg->m_SendBuf );
 		wjson_array_t stackFrames = body.SetArray( "" );
-		dbg->StackTrace( vm, dbg->ThreadToID( vm ), startFrame, levels,
-				parameters, parameterTypes, parameterNames, parameterValues,
-				stackFrames );
+
+		SQDebugServer::stackframeformat_t format = {};
+		format.parameters = parameters;
+		format.parameterTypes = parameterTypes;
+		format.parameterNames = parameterNames;
+		format.parameterValues = parameterValues;
+#ifdef SQDBG_NATIVE_STACKTRACE
+		format.module = true;
+#endif
+
+		dbg->StackTrace( vm, dbg->ThreadToID( vm ), startFrame, levels, format, stackFrames );
 	}
 
 	json_table_t table;
